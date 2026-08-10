@@ -202,6 +202,18 @@ async function handleRelay(req, res, participants, ids, query) {
 function main() {
   const participants = loadParticipants();
   const server = http.createServer((req, res) => {
+    // Permissive CORS: this API carries no session/cookie/secret and never accepts a
+    // client-supplied handler command (see the header comment), so there's nothing an
+    // arbitrary origin gains beyond what the same public endpoints already expose --
+    // needed for the "open index.html locally, point it at a remote bridge" dev workflow
+    // (production serves both from one origin via Caddy, where this is a no-op).
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/participants") {
       res.writeHead(200, { "content-type": "application/json" });
