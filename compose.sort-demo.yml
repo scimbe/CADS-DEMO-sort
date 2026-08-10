@@ -1,0 +1,97 @@
+# Demo: serve https://sort.bunsenbrenner.org through the Browser Plane, with a real
+# Let's Encrypt certificate obtained CORE-side via deSEC DNS-01 — same shape as
+# CADS-a2a-demo/CADS-auction-demo's compose files.
+#
+# Runs ALONGSIDE an already-running CADS-Tunnel plane. Adapt SORT_AGENT_EDGE/
+# SORT_AGENT_CP_URL to your plane.
+#
+#   docker compose -f compose.sort-demo.yml --env-file .env up --build -d
+#
+# The bridge (bridge/, see #2/#3) IS the whole web server for API purposes; Caddy
+# serves the static index.html and reverse-proxies /run|/relay|/participants|/healthz
+# to it (see Caddyfile). The bridge never accepts a participant command from an HTTP
+# caller — every participant's shell command comes from SORT_PARTICIPANTS_FILE, an
+# operator-owned config mounted read-only into the bridge container (see
+# docs/protocol.md and bridge/server.js's own header comment for why that's not
+# optional).
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  sort-demo-bridge:
+    build:
+      context: ./bridge
+      dockerfile: Dockerfile
+    environment:
+      - SORT_BRIDGE_LISTEN=0.0.0.0:8789
+      - SORT_PARTICIPANTS_FILE=/etc/sort-demo/participants.json
+      - SORT_ROUND_TIMEOUT_MS=${SORT_ROUND_TIMEOUT_MS:-30000}
+      - SORT_BUDGET=${SORT_BUDGET:-200}
+    volumes:
+      # Operator-owned participant config — which handler commands are live in this
+      # deployment. Never derived from an HTTP request; see server.js's header comment.
+      - ${SORT_PARTICIPANTS_CONFIG:?set SORT_PARTICIPANTS_CONFIG=<path to a participants.json — see handlers/README.md>}:/etc/sort-demo/participants.json:ro
+      # The handler scripts themselves (participants/*/handler.sh, handlers/reference-sorter.sh)
+      # need to be reachable at whatever path participants.json's "cmd" fields point at.
+      - ./participants:/opt/sort-demo/participants:ro
+      - ./handlers:/opt/sort-demo/handlers:ro
+    # No `ports:` mapping — matches CADS-flappy-demo/CADS-cookbook-demo/CADS-a2a-demo's
+    # own bridge services; only reachable via the Caddy origin below.
+    restart: unless-stopped
+    logging: *default-logging
+
+  sort-demo-origin:
+    build:
+      context: .
+      dockerfile: Caddy.Dockerfile
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./index.html:/srv/index.html:ro
+      - ${SORT_CERT_DIR:?set SORT_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro
+      - sort_demo_caddy_data:/data
+    expose:
+      - "443"
+    depends_on:
+      - sort-demo-bridge
+    restart: unless-stopped
+    logging: *default-logging
+
+  sort-demo-agent:
+    build:
+      context: .
+      dockerfile: Agent.Dockerfile
+      args:
+        - CT_AGENT_REF=${CT_AGENT_REF:-main}
+    environment:
+      - CT_AGENT_MODE=browser
+      - CT_AGENT_HOSTNAME=sort.bunsenbrenner.org
+      - CT_AGENT_TOKEN=${SORT_AGENT_TOKEN:-}
+      - CT_AGENT_ORIGIN=sort-demo-origin:443
+      - CT_AGENT_ORIGIN_PROTO=tcp
+      - CT_AGENT_CAPABILITY_OUT=/tmp/capability.bin
+      - CT_AGENT_EDGE=${SORT_AGENT_EDGE:?edge host:port, e.g. edge:4433}
+      - CT_AGENT_CP_URL=${SORT_AGENT_CP_URL:?control-plane URL for onboarding}
+      - CT_AGENT_JOIN_TOKEN=${SORT_JOIN_TOKEN:?single-use join token}
+      - CT_AGENT_ID=sort-demo
+      - CT_AGENT_EDGE_CERT_URL=${SORT_AGENT_EDGE_CERT_URL:-}
+      - CT_AGENT_STATE_DIR=/var/lib/ct-agent
+      - CT_AGENT_RECONNECT_MAX_ATTEMPTS=0
+    command: ["ct-agent", "onboard"]
+    depends_on:
+      - sort-demo-origin
+    restart: unless-stopped
+    logging: *default-logging
+    volumes:
+      - sort_demo_agent_state:/var/lib/ct-agent
+
+volumes:
+  sort_demo_caddy_data:
+  sort_demo_agent_state:
+
+networks:
+  default:
+    name: ${PLANE_NETWORK:-ct-selfhost_default}
+    external: true

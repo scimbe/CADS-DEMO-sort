@@ -1,0 +1,30 @@
+# Origin for sort.bunsenbrenner.org. Caddy terminates TLS, serves the static
+# visualization page, and reverse-proxies the API surface to the bridge — same shape as
+# CADS-a2a-demo's/CADS-auction-demo's Caddyfile (bridge IS the whole API, this file's
+# only job is TLS + static file + proxy).
+#
+# The cert is issued CORE-side (CADS-Tunnel's scripts/authorize-pipeline.sh, deSEC
+# DNS-01) and mounted in as static files — never an ACME client or DNS credential here.
+#
+# While the tunnel is still Gelb (not yet its own Grün cert), the edge terminates TLS
+# itself with its shared wildcard cert and forwards PLAINTEXT to the origin — the same
+# `auto_https off` + no `tls` directive fix CADS-a2a-demo's/CADS-webconference-demo's
+# Caddyfiles already needed for the identical symptom. Switch to
+# `tls /certs/fullchain.pem /certs/privkey.pem` once this tunnel reaches Grün.
+{
+	auto_https off
+}
+
+:443 {
+	encode gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+	}
+
+	@api path /run/* /relay /participants /healthz
+	reverse_proxy @api sort-demo-bridge:8789
+
+	root * /srv
+	file_server
+}
