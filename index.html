@@ -1,0 +1,899 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sort Arena — same task, same contract, different harness</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='9' width='3' height='6' fill='%235b4bc9'/%3E%3Crect x='6.5' y='5' width='3' height='10' fill='%23a86ae0'/%3E%3Crect x='12' y='2' width='3' height='13' fill='%23e08a5a'/%3E%3C/svg%3E">
+<style>
+ /* ---------------------------------------------------------------------------
+    Palette — CADS-Tunnel demo family (bunsenbrenner.org): dark navy ground,
+    off-white ink, muted slate, hairline rules. `--ok` teal is the ecosystem's
+    shared "positive" accent and is reserved here for sorted / finishedCorrectly
+    ONLY, so a green-ish thing on screen always means exactly one thing.
+
+    Primary accent: indigo / blue-violet. Chosen (a) because the siblings already
+    own the warm end — flappy-demo yellow, a2a-demo terracotta — so a cool accent
+    keeps the three demos telling apart at a glance, and (b) because it is the
+    low pole of this page's own value ramp: the ramp runs indigo (small values)
+    through violet and rose to warm cream (large values), so the brand colour is
+    literally "position 0" of the thing this demo sorts. Comparison sorting is
+    about ordering along an axis; the accent sits at one end of that axis.
+    --------------------------------------------------------------------------- */
+ :root{
+  --bg:#0c111d; --panel:#141b2c; --panel2:#1a2338; --sunken:#0e1524;
+  --line:#2a3450; --line-soft:#212a41;
+  --ink:#e8edf6; --muted:#8a93ad; --muted2:#c3c9db;
+  --accent:#7f6df2; --accent-soft:#5b4bc9; --on-accent:#12102a;
+  --ok:#4ec9b0; --fault:#dfa63f; --danger:#e5654f; --idle:#4a5372;
+  --mono:ui-monospace,"SF Mono","JetBrains Mono","Cascadia Code",Menlo,Consolas,monospace;
+  /* A screen-reading text serif (Charter/Cambria lineage), not a display serif:
+     this page is teaching material, so prose gets a face built for paragraphs.
+     Every number lives in the mono face instead — there is no sans-serif here
+     at all, and that split (prose = serif, measurement = mono) is the whole
+     typographic system. */
+  --serif:Charter,"Bitstream Charter","Sitka Text",Cambria,"Source Serif 4",Georgia,serif;
+ }
+ @media (prefers-color-scheme: light){
+  :root{
+   --bg:#f5f7fb; --panel:#ffffff; --panel2:#eef1f8; --sunken:#f0f3fa;
+   --line:#d7deec; --line-soft:#e3e8f3;
+   --ink:#131a2c; --muted:#5b6478; --muted2:#333d54;
+   --accent:#5a46d6; --accent-soft:#4636ad; --on-accent:#ffffff;
+   --ok:#2f8a7d; --fault:#9a6a12; --danger:#c0412c; --idle:#a7afc4;
+  }
+ }
+ *{box-sizing:border-box}
+ body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--serif);line-height:1.6;
+  -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+ a{color:var(--accent)}
+ h1,h2,h3{font-weight:600;letter-spacing:-.01em;margin:0}
+ code{font-family:var(--mono);background:var(--panel2);padding:.1rem .35rem;border-radius:4px;font-size:.85em}
+
+ /* ---- hero: deliberately small. The arena below is the hero. ---- */
+ header.hero{border-bottom:1px solid var(--line);
+  background-image:linear-gradient(var(--line-soft) 1px,transparent 1px),linear-gradient(90deg,var(--line-soft) 1px,transparent 1px);
+  background-size:34px 34px}
+ .shell{max-width:74rem;margin:0 auto;padding:0 1.5rem}
+ header.hero .shell{padding-top:2rem;padding-bottom:2rem}
+ .brand{font-size:.95rem;color:var(--muted);display:flex;align-items:center;gap:.5rem;margin-bottom:1.1rem}
+ .brand .flame{width:8px;height:8px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px rgba(127,109,242,.22)}
+ .brand a{color:var(--muted2);text-decoration:none}
+ .brand a:hover{text-decoration:underline}
+ .eyebrow{font-family:var(--mono);font-size:.74rem;letter-spacing:.09em;text-transform:uppercase;color:var(--accent);
+  display:flex;align-items:center;gap:.5rem;margin:0 0 .9rem}
+ .eyebrow::before{content:"";width:1.4rem;height:1px;background:var(--accent)}
+ h1{font-size:clamp(1.5rem,3.2vw,2.05rem);line-height:1.22;margin-bottom:.7rem;max-width:34ch}
+ .lede{font-size:1rem;color:var(--muted2);max-width:54ch;margin:0}
+
+ main{padding:2rem 0 3rem}
+
+ /* ---- controls ---- */
+ .controls{display:flex;flex-wrap:wrap;gap:.9rem 1.4rem;align-items:flex-end;margin-bottom:1rem}
+ .ctl{display:flex;flex-direction:column;gap:.35rem}
+ .ctl > label,.roster > legend{font-family:var(--mono);font-size:.68rem;letter-spacing:.09em;text-transform:uppercase;
+  color:var(--muted);padding:0}
+ .roster{border:0;margin:0;padding:0;min-width:0;flex:1 1 22rem}
+ .chips{display:flex;flex-wrap:wrap;gap:.4rem;margin-top:.35rem}
+ .chip{display:inline-flex;align-items:center;gap:.45rem;border:1px solid var(--line);background:var(--panel);
+  border-radius:999px;padding:.32rem .8rem .32rem .55rem;cursor:pointer;font-family:var(--mono);font-size:.76rem;
+  color:var(--muted2);user-select:none}
+ .chip:hover{border-color:var(--accent-soft)}
+ .chip input{position:absolute;opacity:0;width:0;height:0}
+ .chip .swatch{width:9px;height:9px;border-radius:2px;background:var(--idle);flex:none}
+ .chip.on{border-color:var(--accent);color:var(--ink);background:var(--panel2)}
+ .chip:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+ select,input[type=number]{font:inherit;font-family:var(--mono);font-size:.85rem;background:var(--panel);
+  border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:.5rem .7rem}
+ select:focus,input[type=number]:focus{outline:none;border-color:var(--accent)}
+ input[type=number]{width:5.5rem}
+ .btn{font:inherit;font-family:var(--serif);font-size:.94rem;font-weight:600;border:1px solid var(--line);
+  border-radius:7px;padding:.55rem 1.05rem;cursor:pointer;background:var(--panel2);color:var(--ink);
+  transition:filter .15s ease,transform .15s ease}
+ .btn.primary{background:var(--accent);color:var(--on-accent);border-color:transparent}
+ .btn:hover:not(:disabled){filter:brightness(1.1);transform:translateY(-1px)}
+ .btn:disabled{opacity:.42;cursor:default;transform:none}
+ .btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+ /* ---- the arena ---- */
+ .workbench{display:grid;grid-template-columns:minmax(0,1fr);gap:1.1rem}
+ @media (min-width:1000px){.workbench{grid-template-columns:minmax(0,1fr) 20.5rem;align-items:start}}
+ .card{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
+ .card-head{display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;
+  padding:.65rem .9rem;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:.7rem;color:var(--muted)}
+ .card-foot{display:flex;justify-content:space-between;align-items:center;gap:.7rem 1.2rem;flex-wrap:wrap;
+  padding:.6rem .9rem;border-top:1px solid var(--line);font-family:var(--mono);font-size:.67rem;color:var(--muted)}
+ canvas.arena{display:block;width:100%;height:340px;background:var(--panel)}
+ canvas.timeline{display:block;width:100%;height:26px;border-top:1px solid var(--line-soft);background:var(--sunken)}
+ .pill{border:1px solid var(--line);border-radius:999px;padding:.12rem .6rem;display:inline-flex;align-items:center;
+  gap:.35rem;font-family:var(--mono);font-size:.67rem;color:var(--muted)}
+ .pill i{width:6px;height:6px;border-radius:50%;background:var(--idle);display:inline-block;font-style:normal}
+ .pill.live{color:var(--accent);border-color:var(--accent)}
+ .pill.live i{background:var(--accent);box-shadow:0 0 0 3px rgba(127,109,242,.18)}
+ .pill.done{color:var(--ok);border-color:var(--ok)} .pill.done i{background:var(--ok)}
+ .pill.bad{color:var(--danger);border-color:var(--danger)} .pill.bad i{background:var(--danger)}
+ .legend{display:flex;flex-wrap:wrap;gap:.2rem 1rem}
+ .legend span{display:inline-flex;align-items:center;gap:.35rem}
+ .legend b{width:9px;height:9px;border-radius:2px;display:inline-block}
+ .ramp{display:flex;align-items:center;gap:.45rem}
+ canvas.ramp-strip{width:120px;height:9px;display:block;border-radius:2px}
+
+ /* ---- scoreboard ---- */
+ .board{display:grid;gap:.7rem}
+ .score{border:1px solid var(--line);border-left-width:3px;border-radius:10px;background:var(--panel);padding:.7rem .85rem}
+ .score.correct{border-color:var(--ok)}
+ .score .who{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem}
+ .score .who strong{font-size:.95rem;font-weight:600;line-height:1.25}
+ .score .who .id{font-family:var(--mono);font-size:.65rem;color:var(--muted)}
+ .metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:.3rem .8rem;font-family:var(--mono);font-size:.72rem}
+ .metrics div{display:flex;justify-content:space-between;gap:.5rem;color:var(--muted)}
+ .metrics div b{font-weight:500;color:var(--ink);font-variant-numeric:tabular-nums}
+ .metrics div.has-faults b{color:var(--fault)}
+ .sig{margin-top:.55rem;border-top:1px solid var(--line-soft);padding-top:.5rem}
+ .sig .sig-label{font-family:var(--mono);font-size:.62rem;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);
+  display:flex;justify-content:space-between}
+ canvas.spark{display:block;width:100%;height:40px;margin-top:.25rem}
+ .empty{border:1px dashed var(--line);border-radius:10px;padding:1rem;color:var(--muted);font-size:.85rem}
+
+ /* ---- log ---- */
+ .log-wrap{margin-top:1.1rem}
+ .log{padding:.6rem .9rem;font-family:var(--mono);font-size:.735rem;line-height:1.65;max-height:15rem;overflow-y:auto;
+  background:var(--sunken)}
+ .log .line{color:var(--muted);white-space:pre-wrap;word-break:break-word}
+ .log .line .r{color:var(--idle)}
+ .log .line.sys{color:var(--accent)}
+ .log .line.swap{color:var(--muted2)}
+ .log .line.fault{color:var(--fault)}
+ .log .line.err{color:var(--danger)}
+ .log .line.ok{color:var(--ok)}
+
+ .status{font-family:var(--mono);font-size:.78rem;color:var(--muted);min-height:1.3em;margin:.75rem 0 0}
+ .notice{border:1px solid var(--danger);border-left-width:3px;border-radius:10px;background:var(--panel);
+  padding:.85rem 1rem;color:var(--muted2);font-size:.88rem;margin-bottom:1rem}
+ .notice code{font-size:.8em}
+
+ section.explain{margin-top:2.4rem;max-width:60ch}
+ section.explain h2{font-size:1.1rem;margin-bottom:.4rem}
+ section.explain p{color:var(--muted2);font-size:.95rem;margin:.5rem 0}
+
+ footer.site{border-top:1px solid var(--line);margin-top:2.5rem;padding:1.6rem 0}
+ footer.site .shell{color:var(--muted);font-size:.85rem}
+ footer.site a{color:var(--muted2);text-decoration:none}
+ footer.site a:hover{text-decoration:underline}
+
+ @media (prefers-reduced-motion: reduce){
+  .btn:hover:not(:disabled){transform:none}
+ }
+</style>
+</head>
+<body>
+<header class="hero">
+ <div class="shell">
+  <div class="brand"><span class="flame"></span><a href="https://bunsenbrenner.org/">Bunsenbrenner.org</a><span>/ sort-arena</span></div>
+  <p class="eyebrow">CADS-Tunnel reference pipeline</p>
+  <h1>Same array, same one-move contract. Only the harness differs.</h1>
+  <p class="lede">Nothing in this repo sorts anything. Each participant is a separate process reached over an
+   Agent-Fabric channel, and every one of them gets the identical round input and must answer inside the identical
+   strict JSON move. Watch the path, not the result — the comparisons, the swaps, the faults.</p>
+ </div>
+</header>
+
+<main class="shell">
+ <div id="notice" hidden class="notice"></div>
+
+ <div class="controls">
+  <fieldset class="roster">
+   <legend>Participants</legend>
+   <div class="chips" id="roster"><span class="pill"><i></i>loading…</span></div>
+  </fieldset>
+  <div class="ctl">
+   <label for="len">Array length</label>
+   <input type="number" id="len" min="2" max="24" step="1" value="12">
+  </div>
+  <div class="ctl">
+   <label for="pace">Playback</label>
+   <select id="pace">
+    <option value="4">Slow · 4 moves/s</option>
+    <option value="12" selected>Normal · 12 moves/s</option>
+    <option value="30">Fast · 30 moves/s</option>
+    <option value="0">No pacing · jump to end</option>
+   </select>
+  </div>
+  <div class="ctl">
+   <label>&nbsp;</label>
+   <div style="display:flex;gap:.5rem">
+    <button class="btn primary" id="run-solo" disabled>Solo run</button>
+    <button class="btn" id="run-relay" disabled>Relay run</button>
+    <button class="btn" id="stop" disabled>Stop</button>
+   </div>
+  </div>
+ </div>
+
+ <div class="workbench">
+  <div>
+   <div class="card">
+    <div class="card-head">
+     <span id="arena-title">arena · idle</span>
+     <span style="display:flex;gap:.4rem;flex-wrap:wrap">
+      <span class="pill" id="pill-state"><i></i><span>idle</span></span>
+      <span class="pill" id="pill-inv">inversions —</span>
+     </span>
+    </div>
+    <canvas class="arena" id="arena" aria-label="Sorting arena: one bar per array slot, bar height and colour encode the value. Highlighted brackets mark the two indices the current move touches."></canvas>
+    <canvas class="timeline" id="timeline" aria-label="Round timeline: one column per round, coloured by whether that round was a compare, a swap, a fault, or a done claim."></canvas>
+    <div class="card-foot">
+     <span class="legend">
+      <span><b style="background:var(--muted)"></b>compare</span>
+      <span><b style="background:var(--accent)"></b>swap</span>
+      <span><b style="background:var(--fault)"></b>fault</span>
+      <span><b style="background:var(--ok)"></b>done · sorted</span>
+     </span>
+     <span class="ramp"><span id="ramp-lo">low</span><canvas class="ramp-strip" id="ramp" aria-hidden="true"></canvas><span id="ramp-hi">high</span></span>
+    </div>
+   </div>
+   <p class="status" id="status" role="status" aria-live="polite"></p>
+
+   <div class="card log-wrap">
+    <div class="card-head"><span>move log · straight from the bridge stream</span><span id="log-count"></span></div>
+    <div class="log" id="log"></div>
+   </div>
+  </div>
+
+  <div class="board" id="board">
+   <div class="empty">No run yet. Pick a participant and start a solo run — <code>handlers/reference-sorter.sh</code> is
+    the always-online, non-LLM baseline every other participant is measured against.</div>
+  </div>
+ </div>
+
+ <section class="explain">
+  <h2>Reading the signature</h2>
+  <p>The sparkline on each scorecard is <code>inversionsOverTime</code> — how many pairs are still out of order after
+   each swap, computed by the bridge from the move trace and never self-reported. A methodical harness draws a clean
+   staircase down to zero. A harness that thrashes draws a jagged line that climbs back up, because it keeps undoing
+   its own work. A harness that never emits a valid move draws a flat line at its starting height and a fault count
+   that keeps climbing — which is exactly what the protocol promises: a bad participant is rendered, not crashed.</p>
+ </section>
+</main>
+
+<footer class="site">
+ <div class="shell">
+  <a href="https://github.com/scimbe/CADS-DEMO-sort">Source</a> ·
+  <a href="https://github.com/scimbe/CADS-DEMO-sort/blob/main/docs/protocol.md">Move protocol</a> ·
+  <a href="https://docs.bunsenbrenner.org/explanation/agent-fabric-channels/">Agent-Fabric channels</a>
+ </div>
+</footer>
+
+<script>
+(() => {
+ "use strict";
+
+ // The page is served from the same origin as the bridge in a real deployment. `?bridge=` lets
+ // you point a locally-opened copy at a bridge running somewhere else while developing.
+ const BRIDGE = (new URLSearchParams(location.search).get("bridge") || "").replace(/\/+$/, "");
+ const api = (path) => BRIDGE + path;
+
+ const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+ const lightScheme = window.matchMedia("(prefers-color-scheme: light)");
+
+ const $ = (id) => document.getElementById(id);
+ const els = {
+  roster: $("roster"), len: $("len"), pace: $("pace"),
+  solo: $("run-solo"), relay: $("run-relay"), stop: $("stop"),
+  arena: $("arena"), timeline: $("timeline"), ramp: $("ramp"),
+  board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
+  notice: $("notice"), title: $("arena-title"), pillState: $("pill-state"), pillInv: $("pill-inv"),
+  rampLo: $("ramp-lo"), rampHi: $("ramp-hi"),
+ };
+
+ // ---------------------------------------------------------------- colour ----
+ /** OKLCH -> sRGB. Used so the value ramp is monotonic in *perceived* lightness
+  *  rather than in raw RGB channels — a sorted array then reads as one smooth
+  *  sweep, and any remaining disorder shows up as a visible break in that sweep.
+  *  That is the whole point of the colour channel here, so it has to be a real
+  *  perceptual ramp and not evenly-spaced hues. */
+ function oklch(L, C, h) {
+  const hr = (h * Math.PI) / 180, a = C * Math.cos(hr), b = C * Math.sin(hr);
+  const l_ = L + 0.3963377774 * a + 0.2158037573 * b;
+  const m_ = L - 0.1055613458 * a - 0.0638541728 * b;
+  const s_ = L - 0.0894841775 * a - 1.2914855480 * b;
+  const l = l_ * l_ * l_, m = m_ * m_ * m_, s = s_ * s_ * s_;
+  const lin = [
+   4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+   -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+   -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s,
+  ];
+  const enc = (c) => {
+   const v = c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(Math.max(c, 0), 1 / 2.4) - 0.055;
+   return Math.round(Math.min(1, Math.max(0, v)) * 255);
+  };
+  return `rgb(${enc(lin[0])},${enc(lin[1])},${enc(lin[2])})`;
+ }
+
+ /** t in [0,1] -> the value ramp. Hue sweeps 285deg (indigo) through magenta and
+  *  rose to 25deg (warm cream); lightness is monotonic so ordering is legible even
+  *  in greyscale. In light mode the lightness axis inverts so high values stay the
+  *  high-contrast end against a pale ground. Deliberately never enters the
+  *  teal/green band — that band means "sorted" and nothing else on this page. */
+ function rampColor(t) {
+  t = Math.min(1, Math.max(0, t));
+  const light = theme.light;
+  const L = light ? 0.76 - 0.38 * t : 0.50 + 0.35 * t;
+  const C = light ? 0.10 + 0.05 * t : 0.155 * (1 - 0.3 * t * t);
+  return oklch(L, C, 285 + 100 * t);
+ }
+
+ /** Qualitative colours for relay attribution — six well-separated hues, none of
+  *  them teal (reserved) and none of them a value-ramp lookalike at the same
+  *  lightness. Attribution is drawn as a stripe *under* the bar, never as the bar
+  *  fill, so value-colour and who-touched-it never compete for the same pixels. */
+ const ATTRIB_DARK = ["#7f6df2", "#e8785c", "#4aa8e0", "#cf6bab", "#d0a137", "#7fb069"];
+ const ATTRIB_LIGHT = ["#5a46d6", "#c1502f", "#1f7bb0", "#a13d80", "#8a6410", "#4a7a35"];
+ const attribColor = (n) => (theme.light ? ATTRIB_LIGHT : ATTRIB_DARK)[n % 6];
+
+ const theme = { light: lightScheme.matches };
+ function readTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (n) => cs.getPropertyValue(n).trim();
+  theme.light = lightScheme.matches;
+  theme.panel = v("--panel"); theme.sunken = v("--sunken"); theme.line = v("--line");
+  theme.lineSoft = v("--line-soft"); theme.ink = v("--ink"); theme.muted = v("--muted");
+  theme.muted2 = v("--muted2"); theme.accent = v("--accent"); theme.ok = v("--ok");
+  theme.fault = v("--fault"); theme.danger = v("--danger"); theme.idle = v("--idle");
+  theme.mono = v("--mono");
+ }
+ readTheme();
+ lightScheme.addEventListener("change", () => { readTheme(); paintRamp(); renderBoard(); });
+
+ function fitCanvas(canvas) {
+  const r = canvas.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const ctx = canvas.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w: r.width, h: r.height };
+ }
+
+ function paintRamp() {
+  const { ctx, w, h } = fitCanvas(els.ramp);
+  ctx.clearRect(0, 0, w, h);
+  for (let x = 0; x < w; x++) { ctx.fillStyle = rampColor(x / (w - 1)); ctx.fillRect(x, 0, 1, h); }
+ }
+
+ // ----------------------------------------------------------------- state ----
+ const state = {
+  roster: [], selected: new Set(), colorIndex: new Map(),
+  mode: null, running: false, abort: null,
+  array: [], initial: [], vmin: 1, vmax: 99,
+  owner: [],            // relay only: index into the attribution palette per slot
+  active: null,         // { i, j, action, you, until }
+  anim: null,           // { i, j, t0, dur } — the sliding swap
+  timeline: [],         // { action, who }
+  scores: new Map(),    // you -> score record
+  finished: false, sortedNow: false,
+ };
+
+ const inversions = (arr) => {
+  let n = 0;
+  for (let i = 0; i < arr.length; i++) for (let j = i + 1; j < arr.length; j++) if (arr[i] > arr[j]) n++;
+  return n;
+ };
+ const isSorted = (arr) => arr.every((v, i) => i === 0 || arr[i - 1] <= v);
+
+ function blankScore(you, label) {
+  return { you, label: label || you, comparisons: 0, swaps: 0, faults: 0, rounds: 0,
+           wallClockMs: null, inv: [], finishedCorrectly: false, status: "waiting" };
+ }
+
+ // ------------------------------------------------------------- rendering ----
+ const BAR_TOP = 30, BASE_PAD = 34, SIDE = 16, ATTRIB_H = 5;
+
+ function barGeometry(w) {
+  const n = state.array.length || 1;
+  const gap = n > 16 ? 3 : 6;
+  const bw = Math.max(3, (w - SIDE * 2 - gap * (n - 1)) / n);
+  return { n, gap, bw, x: (i) => SIDE + i * (bw + gap) };
+ }
+
+ function drawArena() {
+  const { ctx, w, h } = fitCanvas(els.arena);
+  ctx.clearRect(0, 0, w, h);
+  if (!state.array.length) {
+   ctx.fillStyle = theme.muted;
+   ctx.font = `13px ${theme.mono}`;
+   ctx.textAlign = "center";
+   ctx.fillText("no run yet", w / 2, h / 2);
+   return;
+  }
+  const g = barGeometry(w);
+  const baseY = h - BASE_PAD;
+  const maxH = baseY - BAR_TOP;
+  const span = Math.max(1, state.vmax - state.vmin);
+  const showValues = g.n <= 18 && g.bw >= 16;
+
+  // baseline: turns teal the moment the array is actually in order, which is the
+  // one moment worth noticing and happens before the participant claims `done`.
+  ctx.strokeStyle = state.sortedNow ? theme.ok : theme.line;
+  ctx.lineWidth = state.sortedNow ? 1.5 : 1;
+  ctx.beginPath(); ctx.moveTo(SIDE, baseY + .5); ctx.lineTo(w - SIDE, baseY + .5); ctx.stroke();
+
+  // sliding swap: the two bars trade x positions rather than teleporting, so the
+  // eye can follow which value went where.
+  let slide = null;
+  if (state.anim) {
+   const p = Math.min(1, (performance.now() - state.anim.t0) / state.anim.dur);
+   const e = p < .5 ? 2 * p * p : 1 - Math.pow(-2 * p + 2, 2) / 2;
+   slide = { i: state.anim.i, j: state.anim.j, e };
+   if (p >= 1) state.anim = null;
+  }
+
+  for (let i = 0; i < g.n; i++) {
+   const val = state.array[i];
+   const t = (val - state.vmin) / span;
+   let x = g.x(i);
+   if (slide && i === slide.i) x = g.x(slide.j) + (g.x(slide.i) - g.x(slide.j)) * slide.e;
+   else if (slide && i === slide.j) x = g.x(slide.i) + (g.x(slide.j) - g.x(slide.i)) * slide.e;
+   const bh = Math.max(3, (0.12 + 0.88 * t) * maxH);
+   const y = baseY - bh;
+
+   const touched = state.active && (state.active.i === i || state.active.j === i);
+   ctx.globalAlpha = state.active && !touched ? 0.62 : 1;
+   ctx.fillStyle = rampColor(t);
+   ctx.fillRect(x, y, g.bw, bh);
+
+   if (touched) {
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = state.active.action === "swap" ? theme.accent : theme.muted2;
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x - 1, y - 1, g.bw + 2, bh + 2);
+   }
+   ctx.globalAlpha = 1;
+
+   // relay attribution: a stripe under the slot for whoever last moved it.
+   if (state.mode === "relay" && state.owner[i] != null && state.owner[i] >= 0) {
+    ctx.fillStyle = attribColor(state.owner[i]);
+    ctx.fillRect(x, baseY + 4, g.bw, ATTRIB_H);
+   }
+
+   if (showValues) {
+    ctx.font = `11px ${theme.mono}`;
+    ctx.textAlign = "center";
+    ctx.fillStyle = touched ? theme.ink : theme.muted;
+    ctx.fillText(String(val), x + g.bw / 2, y - 7);
+    ctx.fillStyle = theme.idle;
+    ctx.font = `9px ${theme.mono}`;
+    ctx.fillText(String(i), x + g.bw / 2, baseY + (state.mode === "relay" ? 21 : 14));
+   }
+  }
+
+  // the compare arc: a compare changes nothing, so it needs its own mark or it is
+  // invisible in the bars — this is the "it still costs a round" cue.
+  if (state.active && state.active.action === "compare") {
+   const a = g.x(state.active.i) + g.bw / 2, b = g.x(state.active.j) + g.bw / 2;
+   const y = BAR_TOP - 14;
+   ctx.strokeStyle = theme.muted2; ctx.lineWidth = 1.25;
+   ctx.beginPath();
+   ctx.moveTo(a, y + 8); ctx.lineTo(a, y); ctx.lineTo(b, y); ctx.lineTo(b, y + 8);
+   ctx.stroke();
+  }
+ }
+
+ function drawTimeline() {
+  const { ctx, w, h } = fitCanvas(els.timeline);
+  ctx.clearRect(0, 0, w, h);
+  const tl = state.timeline;
+  if (!tl.length) return;
+  const slots = Math.max(tl.length, 24);
+  const cw = w / slots;
+  for (let k = 0; k < tl.length; k++) {
+   const ev = tl[k];
+   ctx.fillStyle = ev.action === "swap" ? theme.accent
+    : ev.action === "compare" ? theme.muted
+    : ev.action === "fault" ? theme.fault
+    : theme.ok;
+   const barH = ev.action === "compare" ? h * 0.45 : h * 0.8;
+   ctx.fillRect(k * cw, h - barH - 2, Math.max(1, cw - (cw > 3 ? 1 : 0)), barH);
+  }
+ }
+
+ function drawSpark(canvas, series, accent) {
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  if (series.length < 1) return;
+  // A participant that never lands a valid swap has a one-entry series. docs/protocol.md
+  // promises that renders "as a flat line" — so widen it into one rather than a lone dot.
+  if (series.length === 1) series = [series[0], series[0]];
+  const max = Math.max(1, ...series);
+  const pad = 3;
+  const xs = (k) => pad + (k / (series.length - 1)) * (w - pad * 2);
+  const ys = (v) => h - pad - (v / max) * (h - pad * 2);
+
+  ctx.strokeStyle = theme.lineSoft; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(0, h - pad + .5); ctx.lineTo(w, h - pad + .5); ctx.stroke();
+
+  ctx.beginPath(); ctx.moveTo(xs(0), h - pad);
+  series.forEach((v, k) => ctx.lineTo(xs(k), ys(v)));
+  ctx.lineTo(xs(series.length - 1), h - pad); ctx.closePath();
+  ctx.globalAlpha = 0.16; ctx.fillStyle = accent; ctx.fill(); ctx.globalAlpha = 1;
+
+  ctx.beginPath();
+  series.forEach((v, k) => (k ? ctx.lineTo(xs(k), ys(v)) : ctx.moveTo(xs(k), ys(v))));
+  ctx.strokeStyle = accent; ctx.lineWidth = 1.5; ctx.lineJoin = "round"; ctx.stroke();
+
+  const last = series[series.length - 1];
+  ctx.beginPath(); ctx.arc(xs(series.length - 1), ys(last), 2.5, 0, Math.PI * 2);
+  ctx.fillStyle = last === 0 ? theme.ok : accent; ctx.fill();
+ }
+
+ function renderBoard() {
+  if (!state.scores.size) return;
+  els.board.innerHTML = "";
+  for (const s of state.scores.values()) {
+   const card = document.createElement("div");
+   card.className = "score" + (s.finishedCorrectly ? " correct" : "");
+   const accent = state.mode === "relay" ? attribColor(state.colorIndex.get(s.you) || 0) : theme.accent;
+   card.style.borderLeftColor = s.finishedCorrectly ? theme.ok : accent;
+
+   const who = document.createElement("div");
+   who.className = "who";
+   const name = document.createElement("strong"); name.textContent = s.label;
+   const id = document.createElement("span"); id.className = "id"; id.textContent = s.status;
+   who.append(name, id);
+
+   const m = document.createElement("div");
+   m.className = "metrics";
+   const rows = [
+    ["comparisons", s.comparisons, false],
+    ["swaps", s.swaps, false],
+    ["faults", s.faults, s.faults > 0],
+    [state.mode === "relay" ? "ticks" : "rounds", s.rounds, false],
+   ];
+   if (s.wallClockMs != null) rows.push(["wall", (s.wallClockMs / 1000).toFixed(1) + "s", false]);
+   rows.push(["sorted", s.finishedCorrectly ? "yes" : "no", false]);
+   for (const [k, v, warn] of rows) {
+    const d = document.createElement("div");
+    if (warn) d.className = "has-faults";
+    const kk = document.createElement("span"); kk.textContent = k;
+    const vv = document.createElement("b"); vv.textContent = String(v);
+    if (k === "sorted" && s.finishedCorrectly) vv.style.color = theme.ok;
+    d.append(kk, vv); m.append(d);
+   }
+
+   const sig = document.createElement("div");
+   sig.className = "sig";
+   const lab = document.createElement("div");
+   lab.className = "sig-label";
+   // In relay there is one array and therefore one inversion curve for the whole team —
+   // the bridge reports a single `inversionsOverTime` for the session, not one per
+   // participant. Say so, rather than implying each harness has its own signature here.
+   const l1 = document.createElement("span");
+   l1.textContent = state.mode === "relay" ? "shared array · inversions" : "inversions over time";
+   const l2 = document.createElement("span"); l2.textContent = s.inv.length ? String(s.inv[s.inv.length - 1]) : "—";
+   lab.append(l1, l2);
+   const spark = document.createElement("canvas");
+   spark.className = "spark";
+   sig.append(lab, spark);
+
+   card.append(who, m, sig);
+   els.board.append(card);
+   requestAnimationFrame(() => drawSpark(spark, s.inv, accent));
+  }
+ }
+
+ function setPill(el, cls, text) {
+  el.className = "pill" + (cls ? " " + cls : "");
+  el.innerHTML = "";
+  if (cls !== null) { const i = document.createElement("i"); el.append(i); }
+  el.append(document.createTextNode(text));
+ }
+
+ let logLines = 0;
+ function log(text, cls) {
+  const el = document.createElement("div");
+  el.className = "line" + (cls ? " " + cls : "");
+  el.textContent = text;
+  els.log.append(el);
+  if (++logLines > 600) { els.log.firstChild.remove(); logLines--; }
+  els.logCount.textContent = logLines + " lines";
+  els.log.scrollTop = els.log.scrollHeight;
+ }
+
+ // -------------------------------------------------------------- playback ----
+ // The bridge runs the whole session and only then replays the trace as NDJSON
+ // (bridge/server.js), so events arrive in a burst rather than in real time.
+ // Pacing them here is what makes the trace legible as a *path* instead of a
+ // single jump to the sorted state — which is the entire point of the protocol's
+ // one-move-per-call design.
+ const queue = [];
+ let nextAt = 0, rafId = null;
+
+ function pump(now) {
+  rafId = requestAnimationFrame(pump);
+  const paceHz = Number(els.pace.value);
+  const interval = paceHz > 0 ? 1000 / paceHz : 0;
+  let budget = paceHz > 0 ? 4 : 4000; // never block the frame, even when jumping
+  while (queue.length && budget-- > 0 && (interval === 0 || now >= nextAt)) {
+   const ev = queue.shift();
+   applyEvent(ev);
+   if (ev.stage === "start") continue; // the arena should appear instantly
+   nextAt = now + interval;
+   if (interval > 0) break;
+  }
+  if (state.active && state.active.until && now > state.active.until) state.active = null;
+  drawArena();
+  drawTimeline();
+  if (!queue.length && !state.running && !state.anim) { cancelAnimationFrame(rafId); rafId = null; finishRun(); }
+ }
+ function startPump() { if (rafId == null) { nextAt = 0; rafId = requestAnimationFrame(pump); } }
+
+ function scoreFor(you) {
+  if (!state.scores.has(you)) {
+   const meta = state.roster.find((p) => p.you === you);
+   state.scores.set(you, blankScore(you, meta && meta.label));
+  }
+  return state.scores.get(you);
+ }
+
+ function holdMs() {
+  const hz = Number(els.pace.value);
+  return hz > 0 ? Math.min(400, 1000 / hz) : 0;
+ }
+
+ function applyEvent(ev) {
+  if (ev.stage === "start") {
+   state.initial = ev.initialArray.slice();
+   state.array = ev.initialArray.slice();
+   state.vmin = Math.min(...state.array); state.vmax = Math.max(...state.array);
+   state.owner = state.array.map(() => -1);
+   state.sortedNow = isSorted(state.array);
+   els.rampLo.textContent = String(state.vmin);
+   els.rampHi.textContent = String(state.vmax);
+   const ids = ev.mode === "relay" ? ev.participants : [ev.you];
+   ids.forEach((id, k) => state.colorIndex.set(id, k));
+   for (const id of ids) { const s = scoreFor(id); s.status = "running"; s.inv = [inversions(state.array)]; }
+   els.title.textContent = `arena · ${state.mode} · n=${state.array.length} · [${state.initial.join(", ")}]`;
+   log(`start ${state.mode} · ${ids.join(", ")} · [${state.initial.join(", ")}] · ${inversions(state.array)} inversions`, "sys");
+   renderBoard();
+   return;
+  }
+
+  if (ev.stage === "error") {
+   log("ERROR: " + ev.message, "err");
+   setPill(els.pillState, "bad", "bridge error");
+   return;
+  }
+
+  if (ev.stage === "round" || ev.stage === "tick") {
+   const who = ev.you || (state.mode === "solo" ? [...state.scores.keys()][0] : null);
+   const s = who ? scoreFor(who) : null;
+   const n = ev.round != null ? ev.round : ev.tick;
+   const tag = who && state.mode === "relay" ? ` ${who}` : "";
+   if (s) s.rounds = Math.max(s.rounds, n || 0);
+
+   if (ev.action === "fault") {
+    if (s) { s.faults++; s.status = "faulting"; }
+    state.timeline.push({ action: "fault", who });
+    state.active = null;
+    log(`r${String(n).padStart(3)}${tag} FAULT — ${ev.reason}`, "fault");
+   } else if (ev.action === "done") {
+    state.timeline.push({ action: "done", who });
+    if (ev.actuallySorted) {
+     log(`r${String(n).padStart(3)}${tag} done — array is sorted`, "ok");
+     if (s) s.status = "finished";
+    } else {
+     log(`r${String(n).padStart(3)}${tag} done claimed, but the array is NOT sorted — run continues`, "fault");
+     if (s) s.status = "claimed done early";
+    }
+   } else if (ev.action === "compare") {
+    if (s) s.comparisons++;
+    state.timeline.push({ action: "compare", who });
+    state.active = { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() };
+    log(`r${String(n).padStart(3)}${tag} compare ${ev.i} ${ev.j} → ${state.array[ev.i]} vs ${state.array[ev.j]}`);
+   } else if (ev.action === "swap") {
+    if (s) s.swaps++;
+    state.timeline.push({ action: "swap", who });
+    if (ev.resultArray) state.array = ev.resultArray.slice();
+    else { const t = state.array[ev.i]; state.array[ev.i] = state.array[ev.j]; state.array[ev.j] = t; }
+    if (state.mode === "relay" && who != null) {
+     const c = state.colorIndex.get(who);
+     if (c != null) { state.owner[ev.i] = c; state.owner[ev.j] = c; }
+    }
+    state.active = { i: ev.i, j: ev.j, action: "swap", until: performance.now() + holdMs() };
+    if (!reduceMotion.matches && Number(els.pace.value) > 0) {
+     state.anim = { i: ev.i, j: ev.j, t0: performance.now(), dur: Math.min(260, 1000 / Number(els.pace.value)) };
+    }
+    state.sortedNow = isSorted(state.array);
+    const inv = inversions(state.array);
+    if (state.mode === "relay") { for (const sc of state.scores.values()) sc.inv.push(inv); }
+    else if (s) s.inv.push(inv);
+    els.pillInv.textContent = `inversions ${inv}`;
+    log(`r${String(n).padStart(3)}${tag} swap ${ev.i} ${ev.j} → [${state.array.join(", ")}] · ${inv} inv`, "swap");
+   }
+   renderBoard();
+   return;
+  }
+
+  if (ev.stage === "final") {
+   if (ev.finalArray) { state.array = ev.finalArray.slice(); state.sortedNow = isSorted(state.array); }
+   if (state.mode === "solo") {
+    const s = scoreFor(ev.you);
+    s.comparisons = ev.comparisons; s.swaps = ev.swaps; s.faults = ev.faults;
+    s.rounds = ev.roundsUsed; s.wallClockMs = ev.wallClockMs;
+    s.finishedCorrectly = !!ev.finishedCorrectly;
+    if (Array.isArray(ev.inversionsOverTime)) s.inv = ev.inversionsOverTime.slice();
+    s.status = s.finishedCorrectly ? "finished correctly" : (s.faults ? "gave up · faults" : "budget exhausted");
+   } else {
+    const per = ev.perParticipant || {};
+    for (const [you, p] of Object.entries(per)) {
+     const s = scoreFor(you);
+     s.comparisons = p.comparisons; s.swaps = p.swaps; s.faults = p.faults;
+     s.rounds = ev.ticksUsed; s.wallClockMs = ev.wallClockMs;
+     s.finishedCorrectly = !!ev.finishedCorrectly;
+     if (Array.isArray(ev.inversionsOverTime)) s.inv = ev.inversionsOverTime.slice();
+     s.status = ev.finishedCorrectly ? "team sorted it" : (p.faults ? "faults" : "budget exhausted");
+    }
+   }
+   els.pillInv.textContent = `inversions ${inversions(state.array)}`;
+   setPill(els.pillState, ev.finishedCorrectly ? "done" : "bad",
+    ev.finishedCorrectly ? "sorted" : "not sorted");
+   log(`final [${state.array.join(", ")}] · ${ev.finishedCorrectly ? "sorted" : "NOT sorted"} · ` +
+       `${ev.roundsUsed != null ? ev.roundsUsed + " rounds" : ev.ticksUsed + " ticks"} · ${ev.wallClockMs}ms`,
+       ev.finishedCorrectly ? "ok" : "fault");
+   state.finished = true;
+   renderBoard();
+  }
+ }
+
+ function finishRun() {
+  els.solo.disabled = false; els.relay.disabled = false; els.stop.disabled = true;
+  syncButtons();
+  if (!state.finished) setPill(els.pillState, null, "idle");
+  els.status.textContent = state.finished ? "run complete." : "stopped.";
+  drawArena(); drawTimeline(); renderBoard();
+ }
+
+ // -------------------------------------------------------------- networking --
+ async function stream(url) {
+  state.abort = new AbortController();
+  let res;
+  try {
+   res = await fetch(api(url), { method: "POST", signal: state.abort.signal });
+  } catch (e) {
+   throw new Error(`could not reach the bridge (${e.message}). ` +
+    (BRIDGE ? `Configured bridge: ${BRIDGE}` : "Serve this page from the bridge's own origin, or append ?bridge=http://host:port"));
+  }
+  if (!res.ok) {
+   let msg = res.statusText;
+   try { const j = await res.json(); if (j && j.error) msg = j.error; } catch { /* keep statusText */ }
+   throw new Error(`bridge rejected the run (${res.status}): ${msg}`);
+  }
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  const push = (line) => {
+   const t = line.trim();
+   if (!t) return;
+   try { queue.push(JSON.parse(t)); } catch { log("unparseable stream line: " + t, "err"); }
+  };
+  for (;;) {
+   const { done, value } = await reader.read();
+   if (done) break;
+   buf += dec.decode(value, { stream: true });
+   let k;
+   while ((k = buf.indexOf("\n")) >= 0) { push(buf.slice(0, k)); buf = buf.slice(k + 1); }
+  }
+  push(buf);
+ }
+
+ function resetRun(mode) {
+  state.mode = mode; state.running = true; state.finished = false;
+  state.array = []; state.initial = []; state.owner = [];
+  state.active = null; state.anim = null; state.timeline = [];
+  state.scores = new Map(); state.colorIndex = new Map();
+  queue.length = 0; logLines = 0;
+  els.log.innerHTML = ""; els.logCount.textContent = "";
+  els.board.innerHTML = "";
+  els.pillInv.textContent = "inversions —";
+  setPill(els.pillState, "live", "running");
+  els.solo.disabled = true; els.relay.disabled = true; els.stop.disabled = false;
+ }
+
+ async function run(mode) {
+  const ids = [...state.selected];
+  const len = Math.min(24, Math.max(2, Number(els.len.value) || 8));
+  els.len.value = String(len);
+  resetRun(mode);
+  els.status.textContent = mode === "solo"
+   ? `running ${ids[0]} on a fresh array of ${len}…`
+   : `running relay with ${ids.length} participants on a fresh array of ${len}…`;
+  startPump();
+  const url = mode === "solo"
+   ? `/run/${encodeURIComponent(ids[0])}?len=${len}`
+   : `/relay?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`;
+  try {
+   await stream(url);
+  } catch (e) {
+   if (e.name !== "AbortError") { log("ERROR: " + e.message, "err"); els.status.textContent = e.message; setPill(els.pillState, "bad", "failed"); }
+  } finally {
+   state.running = false;
+   startPump(); // make sure the drain-and-finish path runs even on an early failure
+  }
+ }
+
+ // ------------------------------------------------------------------- UI ----
+ function syncButtons() {
+  if (state.running) return;
+  els.solo.disabled = state.selected.size !== 1;
+  els.relay.disabled = state.selected.size < 2;
+  els.relay.textContent = state.selected.size >= 2 ? `Relay run · ${state.selected.size}` : "Relay run";
+ }
+
+ function renderRoster() {
+  els.roster.innerHTML = "";
+  if (!state.roster.length) {
+   const p = document.createElement("span");
+   p.className = "pill"; p.textContent = "no participants configured on the bridge";
+   els.roster.append(p);
+   return;
+  }
+  state.roster.forEach((p, k) => {
+   const label = document.createElement("label");
+   label.className = "chip";
+   const cb = document.createElement("input");
+   cb.type = "checkbox"; cb.value = p.you; cb.checked = state.selected.has(p.you);
+   const sw = document.createElement("span");
+   sw.className = "swatch";
+   sw.style.background = cb.checked ? attribColor(k) : "var(--idle)";
+   const txt = document.createElement("span");
+   txt.textContent = p.label;
+   label.append(cb, sw, txt);
+   label.classList.toggle("on", cb.checked);
+   cb.addEventListener("change", () => {
+    if (cb.checked) state.selected.add(p.you); else state.selected.delete(p.you);
+    label.classList.toggle("on", cb.checked);
+    sw.style.background = cb.checked ? attribColor(k) : "var(--idle)";
+    syncButtons();
+   });
+   els.roster.append(label);
+  });
+  syncButtons();
+ }
+
+ async function loadRoster() {
+  try {
+   const res = await fetch(api("/participants"));
+   if (!res.ok) throw new Error(`HTTP ${res.status}`);
+   state.roster = await res.json();
+   if (state.roster.length) state.selected.add(state.roster[0].you);
+   renderRoster();
+   els.status.textContent = `${state.roster.length} participant(s) configured on the bridge.`;
+  } catch (e) {
+   els.roster.innerHTML = "";
+   els.notice.hidden = false;
+   els.notice.innerHTML =
+    "The bridge is not reachable from this page (<code>GET /participants</code> failed: " +
+    e.message.replace(/[<&]/g, "") +
+    "). Start it with <code>node bridge/server.js</code> and serve this page from the same origin, " +
+    "or append <code>?bridge=http://127.0.0.1:8789</code> to this URL.";
+   els.status.textContent = "bridge unreachable.";
+  }
+ }
+
+ els.solo.addEventListener("click", () => run("solo"));
+ els.relay.addEventListener("click", () => run("relay"));
+ els.stop.addEventListener("click", () => {
+  if (state.abort) state.abort.abort();
+  state.running = false; queue.length = 0;
+  els.status.textContent = "stopped by you.";
+  setPill(els.pillState, null, "stopped");
+  startPump();
+ });
+ window.addEventListener("resize", () => { paintRamp(); drawArena(); drawTimeline(); renderBoard(); });
+
+ paintRamp();
+ drawArena();
+ loadRoster();
+})();
+</script>
+</body>
+</html>
