@@ -1,5 +1,14 @@
 # bubble-sort-claude
 
+> **This README describes the pre-`sort-arena-harness`-skill architecture** — a live `claude -p`
+> call per round, coached by a `SKILL.md` file inlined into the system prompt. This participant
+> has since been migrated to the two-stage generated-code harness: `AGENTS.md` is the spec,
+> `generate.sh` writes `generated/handler.py` once, and `handler.sh` just execs that file — zero
+> LLM calls happen during a live run today. The design discussion and predictions below are kept
+> because the algorithm reasoning is still accurate; only the "how a move actually gets decided"
+> parts are historical. See `AGENTS.md` and `generate.sh` for the current design, and the "Running
+> it yourself" section at the bottom for what actually runs today.
+
 Same model as [`../minimal-claude/`](../minimal-claude/), same CLI, same JSON extraction, same
 strict contract. Same *shape* of coaching as
 [`../algorithm-coached-claude/`](../algorithm-coached-claude/) — a real `SKILL.md` inlined into
@@ -46,14 +55,34 @@ swap per out-of-place element.
 
 ## Live test result
 
-<!-- filled in after the real dryrun.py run against handler.sh — see run log -->
+Real `dryrun.py` run against the current generated handler (`generated/handler.py`, produced by
+`generate.sh` from `AGENTS.md`), same 9-inversion array used for `algorithm-coached-claude`'s Run
+2 above, `budget=600` (see the "Bounds" note in `docs/protocol.md` on why bubble sort's real
+worst case needs a bigger budget than the default 200):
+
+| Metric | Result |
+|---|---|
+| initial array | `[18, 60, 61, 29, 26, 25]` (9 inversions) |
+| final array | `[18, 25, 26, 29, 60, 61]` |
+| `finishedCorrectly` | **true** |
+| `roundsUsed` | 17 |
+| `faults` / `errors` | 0 / 0 |
+| wall clock, whole run | ~1.1s (generated code — no LLM call per round anymore) |
+
+Run twice against the identical array: byte-identical output both times (`rounds=17 faults=0
+errors=0 sorted=True`), confirming this is real, deterministic, reliable code rather than a live
+guess that happened to land once. 17 rounds against `algorithm-coached-claude`'s 8 on a comparably
+scrambled array is bubble sort's real, well-known `O(n^2)` adjacent-only cost — see "Why this is a
+second, orthogonal axis of comparison" above, not a harness defect.
 
 ## Running it yourself
 
 ```bash
-./handler.sh --selftest    # checks SKILL.md is present and loadable, plus extraction; no LLM call
+./handler.sh --selftest    # checks generated/handler.py exists and emits a valid move; no LLM call
 echo '{"round":1,"array":[5,3,8,1,9,2],"history":[],"budgetRemaining":19,"mode":"solo","you":"bubble-sort-claude"}' \
-  | ./handler.sh           # one real LLM call
+  | ./handler.sh            # runs the already-generated code; no LLM call
 ```
 
-Edit `SKILL.md` and re-run — the handler re-reads the file on every invocation.
+To change the strategy, edit `AGENTS.md` and re-run `./generate.sh` — that regenerates
+`generated/handler.py` once; `handler.sh` picks up the new file on its next invocation with no
+restart needed.

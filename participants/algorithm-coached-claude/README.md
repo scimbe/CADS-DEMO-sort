@@ -1,5 +1,15 @@
 # algorithm-coached-claude
 
+> **This README describes the pre-`sort-arena-harness`-skill architecture** — a live `claude -p`
+> call per round, coached by a `SKILL.md` file inlined into the system prompt. This participant
+> has since been migrated to the two-stage generated-code harness: `AGENTS.md` is the spec,
+> `generate.sh` writes `generated/handler.py` once, and `handler.sh` just execs that file — zero
+> LLM calls happen during a live run today. The experiment writeup below (duplicate-value bug,
+> the oscillation, the confound check) is kept as real project history and the algorithm reasoning
+> is still accurate; only the "how a move actually gets decided" parts are historical. See
+> `AGENTS.md` and `generate.sh` for the current design, and "Running it yourself" at the bottom
+> for what actually runs today.
+
 Same model as [`../minimal-claude/`](../minimal-claude/), same CLI, same JSON extraction, same
 strict contract. One thing added: a real Claude Skill file, [`SKILL.md`](SKILL.md), that teaches
 a specific efficient strategy.
@@ -82,7 +92,7 @@ the case the skill told it was impossible. Run 2, on a duplicate-free array, had
 One run each is far too little to call this a duplicates effect, but it is the obvious next
 experiment for a workshop group to run.
 
-### An honest wart: the oscillation
+### The oscillation
 
 Run 2's `inversionsOverTime` is not monotone: `9 → 4 → 7 → 4 → 7 → 4 → 1 → 0`. Rounds 2–5 emitted
 `swap(0,3)` four times in a row, toggling the array between two states before breaking out. The
@@ -95,10 +105,11 @@ headroom the direct-placement strategy has.
 ## Running it yourself
 
 ```bash
-./handler.sh --selftest    # checks SKILL.md is present and loadable, plus extraction; no LLM call
+./handler.sh --selftest    # checks generated/handler.py exists and emits a valid move; no LLM call
 echo '{"round":1,"array":[5,3,8,1,9,2],"history":[],"budgetRemaining":19,"mode":"solo","you":"algorithm-coached-claude"}' \
-  | ./handler.sh           # one real LLM call
+  | ./handler.sh            # runs the already-generated code; no LLM call
 ```
 
-Edit `SKILL.md` and re-run — that is the intended workshop loop. The handler re-reads the file on
-every single invocation, so a change takes effect on the next round with no restart.
+To change the strategy, edit `AGENTS.md` and re-run `./generate.sh` — that regenerates
+`generated/handler.py` once; `handler.sh` picks up the new file on its next invocation with no
+restart needed.
