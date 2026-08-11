@@ -111,6 +111,37 @@ it's watching a chaotic harness's move get quietly cleaned up by a methodical on
 later, or two mismatched strategies repeatedly undo each other. Same scoring table, computed
 per participant across the shared trace.
 
+## Race mode (the direct head-to-head variant)
+
+Same move contract again, but instead of sharing one array, every chosen participant runs an
+independent `solo` session against its **own copy of the same starting array**, concurrently.
+There is no shared state between them — `history` in a race is exactly the same per-participant
+shape `solo` mode already sends, never mixed with another participant's moves. What's new is only
+the pairing: `POST /race?ids=a,b,c&len=N` starts all of them on an identical array and streams
+every participant's round events on one connection, each tagged with `you`, plus a final ranked
+summary (finished-correctly first, then fewest `roundsUsed`, then fastest `wallClockMs`). It
+answers a narrower, more direct question than relay does: given the exact same array, whose
+harness actually gets there first.
+
+## How a handler decides its moves — the contract says nothing about this, on purpose
+
+Nothing above constrains *how* a handler arrives at its move — that's deliberate, and it's the
+actual subject of this arena, not an implementation detail. Two shapes both satisfy this contract
+equally well:
+
+- **A live decision per round**: the handler calls a model fresh every invocation and asks it to
+  decide the move on the spot. Simple to build, but every round pays a real model-call latency,
+  and a subtle spec gap can produce a different wrong answer on every call.
+- **Generated code, run per round**: the handler is a small program, written once (typically by a
+  model, from a strategy spec), that decides the move deterministically. Every round after that
+  is milliseconds, not seconds, and the same input always produces the same output — which means
+  it can actually be verified before it ever competes, not just watched and hoped about live.
+
+This repo's own participants moved from the first shape to the second — see the
+[`sort-arena-harness` skill](https://github.com/scimbe/CADS-DEMO-sort/blob/main/.claude/skills/sort-arena-harness/SKILL.md)
+and the docs site's ["Why generate code, not live decisions"](https://scimbe.github.io/CADS-DEMO-sort-docs/explanation/why-generate-not-decide/)
+for the real evidence behind that move. The wire protocol above didn't need to change either way.
+
 ## Talking to a role over Agent-Fabric — inherited, not reinvented
 
 This protocol only defines the JSON on stdin/stdout. *Getting* that stdin/stdout pair from a
