@@ -205,6 +205,10 @@
    <input type="number" id="len" min="2" max="24" step="1" value="12">
   </div>
   <div class="ctl">
+   <label for="budget" title="Max rounds before a run is cut off, unfinished. Bubble sort's worst case is O(n²) rounds -- at 24 elements that can exceed the 200 default.">Round budget</label>
+   <input type="number" id="budget" min="10" max="2000" step="10" value="200">
+  </div>
+  <div class="ctl">
    <label for="pace">Playback</label>
    <select id="pace">
     <option value="4">Slow · 4 moves/s</option>
@@ -294,7 +298,7 @@
 
  const $ = (id) => document.getElementById(id);
  const els = {
-  roster: $("roster"), soloSelect: $("solo-participant"), len: $("len"), pace: $("pace"),
+  roster: $("roster"), soloSelect: $("solo-participant"), len: $("len"), budget: $("budget"), pace: $("pace"),
   solo: $("run-solo"), partition: $("run-partition"), race: $("run-race"), stop: $("stop"),
   arena: $("arena"), timeline: $("timeline"), ramp: $("ramp"),
   board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
@@ -1126,6 +1130,8 @@
   const ids = mode === "solo" ? [state.soloParticipant] : [...state.selected];
   const len = Math.min(24, Math.max(2, Number(els.len.value) || 8));
   els.len.value = String(len);
+  const budget = Math.min(2000, Math.max(10, Number(els.budget.value) || 200));
+  els.budget.value = String(budget);
   resetRun(mode);
   els.status.textContent = mode === "solo"
    ? `running ${ids[0]} on a fresh array of ${len}…`
@@ -1134,10 +1140,10 @@
    : `splitting an array of ${len} across ${ids.length} participants, one segment each…`;
   startPump();
   const url = mode === "solo"
-   ? `/run/${encodeURIComponent(ids[0])}?len=${len}`
+   ? `/run/${encodeURIComponent(ids[0])}?len=${len}&budget=${budget}`
    : mode === "race"
-   ? `/race?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`
-   : `/partition?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`;
+   ? `/race?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}&budget=${budget}`
+   : `/partition?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}&budget=${budget}`;
   try {
    await stream(url);
   } catch (e) {

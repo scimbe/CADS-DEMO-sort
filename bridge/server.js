@@ -16,6 +16,10 @@
  *   SORT_PARTICIPANTS_FILE   - path to a JSON file with the same shape (checked if the env var above is unset)
  *   SORT_ROUND_TIMEOUT_MS    - per-round handler timeout (default 30000, per docs/protocol.md)
  *   SORT_BUDGET              - default round/tick budget (default 200, per docs/protocol.md)
+ *
+ * Every run/race/partition/relay endpoint also accepts a per-request `?budget=N` query param
+ * (clamped to [10, 2000]), overriding SORT_BUDGET for that one call -- bubble sort's O(n^2)
+ * worst case can exceed the 200-round default at the max array length on an unlucky seed.
  */
 
 const http = require("node:http");
@@ -34,6 +38,14 @@ const {
 const LISTEN = process.env.SORT_BRIDGE_LISTEN || "0.0.0.0:8789";
 const TIMEOUT_MS = Number(process.env.SORT_ROUND_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
 const BUDGET = Number(process.env.SORT_BUDGET || DEFAULT_BUDGET);
+// Bubble sort's worst case is O(n^2) rounds -- at MAX_ARRAY_LEN (24) that's up to 276, which can
+// exceed the default 200-round BUDGET on an unlucky (highly-shuffled) seed array, cutting a
+// perfectly correct run off before it finishes. Let the caller ask for more, bounded so nobody
+// can request an unbounded number of real handler subprocess spawns.
+const MAX_BUDGET = 2000;
+function resolveBudget(query) {
+  return Math.min(Math.max(Number(query.get("budget")) || BUDGET, 10), MAX_BUDGET);
+}
 
 function loadParticipants() {
   const raw =
@@ -130,7 +142,7 @@ async function handleRun(req, res, participants, participantId, query) {
     const result = await runSoloRun({
       you: config.you,
       initialArray,
-      budget: BUDGET,
+      budget: resolveBudget(query),
       callHandler: (input) => callHandlerProcess(config.cmd, input),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
@@ -177,7 +189,7 @@ async function handleRace(req, res, participants, ids, query) {
     const result = await runRaceSession({
       participants: chosen.map((c) => ({ you: c.you, callHandler: (input) => callHandlerProcess(c.cmd, input) })),
       initialArray,
-      budget: BUDGET,
+      budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
     sendNdjson(res, { stage: "final", mode: "race", initialArray: result.initialArray, ranked: result.ranked, results: result.results });
@@ -223,7 +235,7 @@ async function handlePartition(req, res, participants, ids, query) {
     const result = await runPartitionSession({
       participants: chosenWithHandlers,
       initialArray,
-      budget: BUDGET,
+      budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
     sendNdjson(res, {
@@ -258,7 +270,7 @@ async function handleRelay(req, res, participants, ids, query) {
   try {
     const result = await runRelaySession({
       initialArray,
-      budget: BUDGET,
+      budget: resolveBudget(query),
       getOnlineParticipants: () =>
         chosen.map((c) => ({
           you: c.you,
