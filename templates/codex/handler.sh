@@ -10,10 +10,15 @@
 # tested — run `./handler.sh --selftest`. See README.md for exactly what is and isn't verified.
 set -uo pipefail
 
-# Windows ships `python`/`py`, not `python3` -- `python3` there is a Microsoft Store alias stub
-# that does nothing useful (CADS-DEMO-sort-docs#1). Resolve once, fail clearly if neither exists.
-PY="$(command -v python3 || command -v python || true)"
-[ -n "$PY" ] || { echo "handler: no python3 or python found on PATH" >&2; exit 1; }
+# Windows ships `python`/`py`, not `python3` -- and `command -v python3` is NOT enough to detect
+# that (CADS-DEMO-sort-docs#1, second round): a real, executable Microsoft Store alias stub named
+# `python3` sits on PATH in every default Windows install, so `command -v` finds it and reports
+# success -- it only fails once you actually RUN it. Probe by execution, not presence.
+PY=""
+for c in python3 python py; do
+  if "$c" -c 'import sys' >/dev/null 2>&1; then PY="$c"; break; fi
+done
+[ -n "$PY" ] || { echo "handler: no working python3/python/py found on PATH" >&2; exit 1; }
 
 # The LLM output is not guaranteed to be a bare object: models fence it in ```json, pretty-print
 # it across lines, or prepend a sentence. Flatten newlines FIRST — grep is line-oriented, so a
