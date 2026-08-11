@@ -105,6 +105,11 @@
   padding:.6rem .9rem;border-top:1px solid var(--line);font-family:var(--mono);font-size:.67rem;color:var(--muted)}
  canvas.arena{display:block;width:100%;height:340px;background:var(--panel)}
  canvas.timeline{display:block;width:100%;height:26px;border-top:1px solid var(--line-soft);background:var(--sunken)}
+ canvas.mini-arena{display:block;width:100%;height:64px;margin:.6rem 0;border-radius:6px;background:var(--sunken)}
+ .attrib-legend{display:flex;flex-wrap:wrap;gap:.3rem .9rem;padding:.55rem .9rem;border-top:1px solid var(--line-soft);
+  font-family:var(--mono);font-size:.68rem;color:var(--muted)}
+ .attrib-legend span{display:inline-flex;align-items:center;gap:.35rem}
+ .attrib-legend b{width:9px;height:9px;border-radius:2px;display:inline-block;flex:none}
  .pill{border:1px solid var(--line);border-radius:999px;padding:.12rem .6rem;display:inline-flex;align-items:center;
   gap:.35rem;font-family:var(--mono);font-size:.67rem;color:var(--muted)}
  .pill i{width:6px;height:6px;border-radius:50%;background:var(--idle);display:inline-block;font-style:normal}
@@ -231,6 +236,7 @@
     </div>
     <canvas class="arena" id="arena" aria-label="Sorting arena: one bar per array slot, bar height and colour encode the value. Highlighted brackets mark the two indices the current move touches."></canvas>
     <canvas class="timeline" id="timeline" aria-label="Round timeline: one column per round, coloured by whether that round was a compare, a swap, a fault, or a done claim."></canvas>
+    <div class="attrib-legend" id="attrib-legend" hidden></div>
     <div class="card-foot">
      <span class="legend">
       <span><b style="background:var(--muted)"></b>compare</span>
@@ -293,7 +299,7 @@
   arena: $("arena"), timeline: $("timeline"), ramp: $("ramp"),
   board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
   notice: $("notice"), title: $("arena-title"), pillState: $("pill-state"), pillInv: $("pill-inv"),
-  rampLo: $("ramp-lo"), rampHi: $("ramp-hi"),
+  rampLo: $("ramp-lo"), rampHi: $("ramp-hi"), attribLegend: $("attrib-legend"),
  };
 
  // ---------------------------------------------------------------- colour ----
@@ -388,10 +394,12 @@
   scores: new Map(),    // you -> score record
   // race only: each participant runs against its OWN copy of the same starting array,
   // concurrently — there is no single shared array to animate in the main arena canvas the way
-  // solo/relay have, so the arena stays a static reference view and per-participant progress
-  // (comparisons/swaps/faults/inversions) lives entirely in the scoreboard cards instead.
-  raceArrays: new Map(), // you -> that participant's own current array
-  raceRanked: null,      // final ranked summary (stage:"final"), rendered above the scoreboards
+  // solo/relay have, so the main arena shows only the shared starting point and each
+  // participant's own live progress is drawn as a small bar chart inside its own scorecard
+  // (see paintMiniArena) instead.
+  raceArrays: new Map(),  // you -> that participant's own current array
+  raceActive: new Map(),  // you -> { i, j, action, until } — the swap/compare each is mid-showing
+  raceRanked: null,       // final ranked summary (stage:"final"), rendered above the scoreboards
   finished: false, sortedNow: false,
  };
 
@@ -547,6 +555,53 @@
   ctx.fillStyle = last === 0 ? theme.ok : accent; ctx.fill();
  }
 
+ /** Race mode's real fix: each participant races its OWN array, so each scorecard gets its own
+  *  small live bar chart instead of the single big arena (which can only ever show one array at
+  *  a time) sitting frozen for the whole run. Deliberately simpler than drawArena's — no sliding
+  *  swap animation, just current positions plus a highlight on whatever pair this participant's
+  *  last event touched — legible at a much smaller size. */
+ function paintMiniArena(canvas, array, active) {
+  const { ctx, w, h } = fitCanvas(canvas);
+  ctx.clearRect(0, 0, w, h);
+  if (!array || !array.length) {
+   ctx.fillStyle = theme.muted;
+   ctx.font = `10px ${theme.mono}`;
+   ctx.textAlign = "center";
+   ctx.fillText("waiting…", w / 2, h / 2);
+   return;
+  }
+  const n = array.length;
+  const pad = 4, gap = n > 16 ? 2 : 4;
+  const bw = Math.max(2, (w - pad * 2 - gap * (n - 1)) / n);
+  const baseY = h - 6;
+  const maxH = h - 12;
+  const span = Math.max(1, state.vmax - state.vmin);
+  const sorted = isSorted(array);
+
+  ctx.strokeStyle = sorted ? theme.ok : theme.lineSoft;
+  ctx.lineWidth = sorted ? 1.25 : 1;
+  ctx.beginPath(); ctx.moveTo(pad, baseY + .5); ctx.lineTo(w - pad, baseY + .5); ctx.stroke();
+
+  for (let i = 0; i < n; i++) {
+   const val = array[i];
+   const t = (val - state.vmin) / span;
+   const x = pad + i * (bw + gap);
+   const bh = Math.max(2, (0.15 + 0.85 * t) * maxH);
+   const y = baseY - bh;
+   const touched = active && (active.i === i || active.j === i);
+   ctx.globalAlpha = active && !touched ? 0.5 : 1;
+   ctx.fillStyle = rampColor(t);
+   ctx.fillRect(x, y, bw, bh);
+   if (touched) {
+    ctx.globalAlpha = 1;
+    ctx.strokeStyle = active.action === "swap" ? theme.accent : theme.muted2;
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(x - .5, y - .5, bw + 1, bh + 1);
+   }
+   ctx.globalAlpha = 1;
+  }
+ }
+
  function raceLabel(you) {
   const meta = state.roster.find((p) => p.you === you);
   return meta ? meta.label : you;
@@ -594,6 +649,20 @@
    const name = document.createElement("strong"); name.textContent = s.label;
    const id = document.createElement("span"); id.className = "id"; id.textContent = s.status;
    who.append(name, id);
+   card.append(who);
+
+   if (state.mode === "race") {
+    // The actual fix for "the arena never moves during a race": this participant's own live
+    // array, drawn right on its own scorecard, since the shared big arena can't show N
+    // independent arrays at once.
+    const mini = document.createElement("canvas");
+    mini.className = "mini-arena";
+    mini.setAttribute("aria-label", `${s.label}'s own current array, live`);
+    card.append(mini);
+    const miniArray = state.raceArrays.get(s.you);
+    const miniActive = state.raceActive.get(s.you);
+    requestAnimationFrame(() => paintMiniArena(mini, miniArray, miniActive));
+   }
 
    const m = document.createElement("div");
    m.className = "metrics";
@@ -629,7 +698,7 @@
    spark.className = "spark";
    sig.append(lab, spark);
 
-   card.append(who, m, sig);
+   card.append(m, sig);
    els.board.append(card);
    requestAnimationFrame(() => drawSpark(spark, s.inv, accent));
   }
@@ -675,6 +744,9 @@
    if (interval > 0) break;
   }
   if (state.active && state.active.until && now > state.active.until) state.active = null;
+  if (state.raceActive.size) {
+   for (const [who, a] of state.raceActive) if (a.until && now > a.until) state.raceActive.delete(who);
+  }
   drawArena();
   drawTimeline();
   if (!queue.length && !state.running && !state.anim) { cancelAnimationFrame(rafId); rafId = null; finishRun(); }
@@ -694,6 +766,30 @@
   return hz > 0 ? Math.min(400, 1000 / hz) : 0;
  }
 
+ // Relay's arena draws a coloured stripe under whichever slot each participant last touched
+ // (drawArena, ATTRIB_H), but had no key anywhere on screen mapping a colour back to a name --
+ // exactly the "what am I even looking at" gap this whole pass is fixing. `ids` is the relay
+ // roster in the same order state.colorIndex assigns swatch colours from; pass null to hide it.
+ function renderAttribLegend(ids) {
+  if (!ids || !ids.length) { els.attribLegend.hidden = true; els.attribLegend.innerHTML = ""; return; }
+  els.attribLegend.innerHTML = "";
+  const caption = document.createElement("span");
+  caption.textContent = "stripe colour = who last touched that slot:";
+  caption.style.color = "var(--muted2)";
+  els.attribLegend.append(caption);
+  ids.forEach((you, k) => {
+   const meta = state.roster.find((p) => p.you === you);
+   const item = document.createElement("span");
+   const sw = document.createElement("b");
+   sw.style.background = attribColor(k);
+   const label = document.createElement("span");
+   label.textContent = meta ? meta.label : you;
+   item.append(sw, label);
+   els.attribLegend.append(item);
+  });
+  els.attribLegend.hidden = false;
+ }
+
  function applyEvent(ev) {
   if (ev.stage === "start") {
    state.initial = ev.initialArray.slice();
@@ -708,11 +804,15 @@
    for (const id of ids) { const s = scoreFor(id); s.status = "running"; s.inv = [inversions(state.array)]; }
    if (ev.mode === "race") {
     // Every participant races an independent copy of this SAME array — track each one
-    // separately instead of trying to animate N concurrent arrays in one arena canvas.
+    // separately, and give each its own live mini-arena on its scorecard (paintMiniArena)
+    // instead of trying to animate N concurrent arrays in one shared canvas.
     state.raceArrays = new Map(ids.map((id) => [id, ev.initialArray.slice()]));
    }
-   const staticNote = ev.mode === "race" ? " · static view — live progress in the scoreboards below" : "";
-   els.title.textContent = `arena · ${state.mode} · n=${state.array.length} · [${state.initial.join(", ")}]${staticNote}`;
+   const note = ev.mode === "race"
+    ? " · shared starting point — each racer's own live array is on its scorecard below"
+    : "";
+   els.title.textContent = `arena · ${state.mode} · n=${state.array.length} · [${state.initial.join(", ")}]${note}`;
+   renderAttribLegend(ev.mode === "relay" ? ids : null);
    log(`start ${state.mode} · ${ids.join(", ")} · [${state.initial.join(", ")}] · ${inversions(state.array)} inversions`, "sys");
    renderBoard();
    return;
@@ -738,10 +838,11 @@
    if (ev.action === "fault") {
     if (s) { s.faults++; s.status = "faulting"; }
     state.timeline.push({ action: "fault", who });
-    if (!isRace) state.active = null;
+    if (isRace && who) state.raceActive.delete(who); else if (!isRace) state.active = null;
     log(`r${String(n).padStart(3)}${tag} FAULT — ${ev.reason}`, "fault");
    } else if (ev.action === "done") {
     state.timeline.push({ action: "done", who });
+    if (isRace && who) state.raceActive.delete(who);
     if (ev.actuallySorted) {
      log(`r${String(n).padStart(3)}${tag} done — array is sorted`, "ok");
      if (s) s.status = "finished";
@@ -752,7 +853,8 @@
    } else if (ev.action === "compare") {
     if (s) s.comparisons++;
     state.timeline.push({ action: "compare", who });
-    if (!isRace) state.active = { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() };
+    if (isRace && who) state.raceActive.set(who, { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() });
+    else if (!isRace) state.active = { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() };
     log(`r${String(n).padStart(3)}${tag} compare ${ev.i} ${ev.j} → ${arr[ev.i]} vs ${arr[ev.j]}`);
    } else if (ev.action === "swap") {
     if (s) s.swaps++;
@@ -762,6 +864,7 @@
      // this is always the live path: mutate this participant's own array copy in place.
      if (ev.resultArray) state.raceArrays.set(who, ev.resultArray.slice());
      else if (arr) { const t = arr[ev.i]; arr[ev.i] = arr[ev.j]; arr[ev.j] = t; }
+     if (who) state.raceActive.set(who, { i: ev.i, j: ev.j, action: "swap", until: performance.now() + holdMs() });
     } else {
      if (ev.resultArray) state.array = ev.resultArray.slice();
      else { const t = state.array[ev.i]; state.array[ev.i] = state.array[ev.j]; state.array[ev.j] = t; }
@@ -883,10 +986,11 @@
   state.array = []; state.initial = []; state.owner = [];
   state.active = null; state.anim = null; state.timeline = [];
   state.scores = new Map(); state.colorIndex = new Map();
-  state.raceArrays = new Map(); state.raceRanked = null;
+  state.raceArrays = new Map(); state.raceActive = new Map(); state.raceRanked = null;
   queue.length = 0; logLines = 0;
   els.log.innerHTML = ""; els.logCount.textContent = "";
   els.board.innerHTML = "";
+  els.attribLegend.hidden = true; els.attribLegend.innerHTML = "";
   els.pillInv.textContent = "inversions —";
   setPill(els.pillState, "live", "running");
   els.solo.disabled = true; els.relay.disabled = true; els.race.disabled = true; els.stop.disabled = false;
