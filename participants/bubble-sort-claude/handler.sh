@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# participants/algorithm-coached-claude/handler.sh — same model, coached strategy (CADS-DEMO-sort#5).
+# participants/bubble-sort-claude/handler.sh — same model, coached bubble sort specifically.
 #
 # Contract: one round-input JSON object on stdin -> exactly one move JSON object on stdout,
 # per docs/protocol.md. Point CT_LLM_CMD at your non-interactive LLM CLI (default: `claude`).
 #
 # Context comes from participants/CLAUDE.md (shared protocol contract) plus this directory's own
-# AGENTS.md/CLAUDE.md (strategy — selection sort by direct placement), via Claude Code's native
-# project-file auto-discovery: `cd` into this directory, no hand-built --append-system-prompt
-# string, no manual `cat SKILL.md`. See participants/minimal-claude/handler.sh for the same
-# pattern with commentary on why (CADS-DEMO-sort#11).
+# AGENTS.md/CLAUDE.md (strategy — real bubble sort, adjacent-pair passes, cursor reconstructed
+# each round from the single most recent move in history), via Claude Code's native project-file
+# auto-discovery. See participants/minimal-claude/handler.sh for the same pattern with commentary
+# on why (CADS-DEMO-sort#11).
 #
 # No hardcoded-move fallback, on purpose — see participants/minimal-claude/handler.sh.
 set -uo pipefail
@@ -30,10 +30,10 @@ if [ "${1:-}" = "--selftest" ]; then
   [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
   [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
   grep -q 'action.*swap' "$HERE/AGENTS.md" || { echo "SELFTEST FAIL: AGENTS.md does not teach the move format" >&2; exit 1; }
-  got="$(printf '{\n  "action": "swap",\n  "i": 0,\n  "j": 3\n}\n' | extract_move_json)"
-  printf '%s' "$got" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"swap","i":0,"j":3}, m' \
+  got="$(printf '{\n  "action": "swap",\n  "i": 0,\n  "j": 1\n}\n' | extract_move_json)"
+  printf '%s' "$got" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"swap","i":0,"j":1}, m' \
     || { echo "SELFTEST FAIL: extraction did not recover the move" >&2; exit 1; }
-  echo "SELFTEST OK: algorithm-coached-claude has AGENTS.md/CLAUDE.md and extracts multi-line moves"
+  echo "SELFTEST OK: bubble-sort-claude has AGENTS.md/CLAUDE.md and extracts multi-line moves"
   exit 0
 fi
 

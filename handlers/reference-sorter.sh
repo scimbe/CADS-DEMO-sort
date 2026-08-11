@@ -12,9 +12,15 @@
 # process is invoked fresh per round, per docs/protocol.md's "one invocation per call").
 set -euo pipefail
 
+# Windows ships `python` (or the `py` launcher), not `python3` -- `python3` there is a Microsoft
+# Store alias stub that does nothing useful (CADS-DEMO-sort-docs#1). Resolve once, fail clearly
+# if neither exists, rather than let a bare `python3: command not found` be the only signal.
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || { echo "reference-sorter: no python3 or python found on PATH" >&2; exit 1; }
+
 if [ "${1:-}" = "--selftest" ]; then
   out="$(printf '%s' '{"round":1,"array":[3,1,2],"history":[],"budgetRemaining":10,"mode":"solo","you":"reference-sorter"}' | "$0")"
-  echo "$out" | python3 -c 'import sys,json; m=json.load(sys.stdin); assert m["action"] in ("compare","swap","done"), m' \
+  echo "$out" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m["action"] in ("compare","swap","done"), m' \
     || { echo "SELFTEST FAIL: reference-sorter did not emit a valid move" >&2; exit 1; }
   echo "SELFTEST OK: reference-sorter emits a valid move for a real round input"
   exit 0
@@ -22,7 +28,7 @@ fi
 
 INPUT="$(cat)"
 
-python3 - "$INPUT" <<'PY'
+"$PY" - "$INPUT" <<'PY'
 import json, sys
 
 data = json.loads(sys.argv[1])

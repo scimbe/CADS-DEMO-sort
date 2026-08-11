@@ -4,13 +4,20 @@
 # Contract: one round-input JSON object on stdin -> exactly one move JSON object on stdout,
 # per docs/protocol.md. Point CT_LLM_CMD at your non-interactive LLM CLI (default: `claude`).
 #
-# The difference from participants/minimal-claude is a system prompt that rewards exploration and
-# variety over efficiency. The output-format half of the prompt is if anything MORE emphatic than
-# the baseline's: a worse *strategy* is the point, a broken *contract* is not. Whether that holds
-# in practice is an empirical question this participant's README answers with real numbers.
+# Context comes from participants/CLAUDE.md (shared protocol contract) plus this directory's own
+# AGENTS.md/CLAUDE.md (strategy — exploratory, undisciplined, on purpose), via Claude Code's
+# native project-file auto-discovery. See participants/minimal-claude/handler.sh for the same
+# pattern with commentary on why (CADS-DEMO-sort#11).
 #
 # No hardcoded-move fallback, on purpose — see participants/minimal-claude/handler.sh.
 set -uo pipefail
+
+# Windows ships `python`/`py`, not `python3` -- `python3` there is a Microsoft Store alias stub
+# that does nothing useful (CADS-DEMO-sort-docs#1). Resolve once, fail clearly if neither exists.
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || { echo "handler: no python3 or python found on PATH" >&2; exit 1; }
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 extract_move_json() {
   local flat
@@ -19,35 +26,20 @@ extract_move_json() {
 }
 
 if [ "${1:-}" = "--selftest" ]; then
+  [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
+  [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
   got="$(printf 'Let me try something different!\n{"action":"compare","i":5,"j":1}\n' | extract_move_json)"
-  printf '%s' "$got" | python3 -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"compare","i":5,"j":1}, m' \
+  printf '%s' "$got" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"compare","i":5,"j":1}, m' \
     || { echo "SELFTEST FAIL: extraction did not recover the move from a chatty reply" >&2; exit 1; }
-  echo "SELFTEST OK: chaotic-claude extracts a move even from a chatty reply"
+  echo "SELFTEST OK: chaotic-claude has AGENTS.md/CLAUDE.md and extracts a move from a chatty reply"
   exit 0
 fi
 
 LLM="${CT_LLM_CMD:-claude}"
 INPUT="$(cat)"
 
-SYS='You are one participant in a sorting arena. The user message is a JSON object with an "array" field holding the current array state. Your eventual aim is ascending order, but you are explicitly NOT here to be efficient.
-
-HOW TO CHOOSE YOUR MOVE — read this carefully, it is what makes you you:
-- Be exploratory and unpredictable. Prize variety over progress.
-- Avoid the obvious move. If one swap is clearly the textbook next step, pick a different pair.
-- Do NOT follow a named algorithm (no bubble sort, no selection sort, no insertion sort). Improvise.
-- Favour distant, unusual index pairs over neighbouring ones.
-- Spend rounds on "compare" freely, just to look around, even when it teaches you nothing.
-- Vary what you do from round to round; look at "history" and deliberately do something unlike your recent moves.
-
-THE OUTPUT CONTRACT IS NOT NEGOTIABLE. Your creativity applies to WHICH move you pick, never to HOW you report it. Reply with EXACTLY ONE JSON object and nothing else — no prose, no explanation, no markdown fences. The only valid replies are:
-{"action":"compare","i":<int>,"j":<int>}
-{"action":"swap","i":<int>,"j":<int>}
-{"action":"done"}
-i and j are 0-based indices into "array", both in range, and different from each other. Breaking this format is a wasted round, not an interesting choice.'
-
-OUT="$($LLM -p "$INPUT" --output-format text \
-  --disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent" \
-  --append-system-prompt "$SYS" 2>/dev/null)" || OUT=""
+OUT="$(cd "$HERE" && "$LLM" -p "$INPUT" --output-format text \
+  --disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent" 2>/dev/null)" || OUT=""
 
 MOVE="$(printf '%s' "$OUT" | extract_move_json)"
 if [ -n "$MOVE" ]; then

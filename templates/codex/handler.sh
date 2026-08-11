@@ -10,16 +10,21 @@
 # tested — run `./handler.sh --selftest`. See README.md for exactly what is and isn't verified.
 set -uo pipefail
 
+# Windows ships `python`/`py`, not `python3` -- `python3` there is a Microsoft Store alias stub
+# that does nothing useful (CADS-DEMO-sort-docs#1). Resolve once, fail clearly if neither exists.
+PY="$(command -v python3 || command -v python || true)"
+[ -n "$PY" ] || { echo "handler: no python3 or python found on PATH" >&2; exit 1; }
+
 # The LLM output is not guaranteed to be a bare object: models fence it in ```json, pretty-print
 # it across lines, or prepend a sentence. Flatten newlines FIRST — grep is line-oriented, so a
 # multi-line object would otherwise match nothing on every individual line.
 extract_json_object() { tr -d '\n' | grep -o '{[^}]*}' | head -1; }
 
 # Reject anything the bridge would reject, before it reaches the bridge. Takes the candidate move
-# as $1 and the round input as $2 — both as ARGUMENTS, not on stdin, because `python3 -` reads the
+# as $1 and the round input as $2 — both as ARGUMENTS, not on stdin, because `"$PY" -` reads the
 # script itself from stdin. Prints the move on success, exits 1 on any violation.
 validate_move() {
-  python3 - "$1" "$2" <<'PY'
+  "$PY" - "$1" "$2" <<'PY'
 import json, sys
 
 try:
