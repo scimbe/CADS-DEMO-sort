@@ -1,5 +1,9 @@
 # Sort Arena — a CADS-Tunnel reference pipeline
 
+**Docs:** [scimbe.github.io/CADS-DEMO-sort-docs](https://scimbe.github.io/CADS-DEMO-sort-docs/) —
+tutorials, how-to guides, reference, and explanation (Diátaxis).
+**Live:** [sort.bunsenbrenner.org](https://sort.bunsenbrenner.org/)
+
 A live sorting-algorithm visualizer where the sorting isn't done by this repo's own code — it's
 done by whichever LLM harness a participant chooses to bring, over a real Agent-Fabric channel.
 Same underlying task, same strict output contract, wildly different results depending on the
