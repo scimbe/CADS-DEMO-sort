@@ -197,7 +197,7 @@
    <select id="solo-participant"><option>loading…</option></select>
   </div>
   <fieldset class="roster">
-   <legend>Relay / race participants (pick 2+)</legend>
+   <legend>Partition / race participants (pick 2+)</legend>
    <div class="chips" id="roster"><span class="pill"><i></i>loading…</span></div>
   </fieldset>
   <div class="ctl">
@@ -217,7 +217,7 @@
    <label>&nbsp;</label>
    <div style="display:flex;gap:.5rem">
     <button class="btn primary" id="run-solo" disabled>Solo run</button>
-    <button class="btn" id="run-relay" disabled>Relay run</button>
+    <button class="btn" id="run-partition" disabled>Partition run</button>
     <button class="btn" id="run-race" disabled>Race run</button>
     <button class="btn" id="stop" disabled>Stop</button>
    </div>
@@ -295,7 +295,7 @@
  const $ = (id) => document.getElementById(id);
  const els = {
   roster: $("roster"), soloSelect: $("solo-participant"), len: $("len"), pace: $("pace"),
-  solo: $("run-solo"), relay: $("run-relay"), race: $("run-race"), stop: $("stop"),
+  solo: $("run-solo"), partition: $("run-partition"), race: $("run-race"), stop: $("stop"),
   arena: $("arena"), timeline: $("timeline"), ramp: $("ramp"),
   board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
   notice: $("notice"), title: $("arena-title"), pillState: $("pill-state"), pillInv: $("pill-inv"),
@@ -387,11 +387,11 @@
   roster: [], selected: new Set(), soloParticipant: null, colorIndex: new Map(), rosterLoaded: false,
   mode: null, running: false, abort: null,
   array: [], initial: [], vmin: 1, vmax: 99,
-  owner: [],            // relay only: index into the attribution palette per slot
-  active: null,         // { i, j, action, you, until }
-  anim: null,           // { i, j, t0, dur } — the sliding swap
-  timeline: [],         // { action, who }
-  scores: new Map(),    // you -> score record
+  owner: [],             // relay/partition: index into the attribution palette per slot
+  active: null,          // { i, j, action, you, until }
+  anim: null,            // { i, j, t0, dur } — the sliding swap
+  timeline: [],          // { action, who }
+  scores: new Map(),     // you -> score record
   // race only: each participant runs against its OWN copy of the same starting array,
   // concurrently — there is no single shared array to animate in the main arena canvas the way
   // solo/relay have, so the main arena shows only the shared starting point and each
@@ -400,6 +400,11 @@
   raceArrays: new Map(),  // you -> that participant's own current array
   raceActive: new Map(),  // you -> { i, j, action, until } — the swap/compare each is mid-showing
   raceRanked: null,       // final ranked summary (stage:"final"), rendered above the scoreboards
+  // partition only: fixed { you, start, length } per participant — segments never overlap, so
+  // (unlike race) everyone's progress lives in the ONE shared state.array/owner above, just at a
+  // fixed offset each.
+  segments: [],
+  partitionFinal: null,   // final summary (stage:"final"): { wholeArraySorted, perParticipant }
   finished: false, sortedNow: false,
  };
 
@@ -479,8 +484,10 @@
    }
    ctx.globalAlpha = 1;
 
-   // relay attribution: a stripe under the slot for whoever last moved it.
-   if (state.mode === "relay" && state.owner[i] != null && state.owner[i] >= 0) {
+   // attribution stripe under the slot: relay = whoever last moved it (dynamic, per-move);
+   // partition = whichever participant's fixed segment owns it (static, set once at start).
+   const showsAttrib = state.mode === "relay" || state.mode === "partition";
+   if (showsAttrib && state.owner[i] != null && state.owner[i] >= 0) {
     ctx.fillStyle = attribColor(state.owner[i]);
     ctx.fillRect(x, baseY + 4, g.bw, ATTRIB_H);
    }
@@ -492,7 +499,7 @@
     ctx.fillText(String(val), x + g.bw / 2, y - 7);
     ctx.fillStyle = theme.idle;
     ctx.font = `9px ${theme.mono}`;
-    ctx.fillText(String(i), x + g.bw / 2, baseY + (state.mode === "relay" ? 21 : 14));
+    ctx.fillText(String(i), x + g.bw / 2, baseY + (showsAttrib ? 21 : 14));
    }
   }
 
@@ -632,16 +639,55 @@
   return card;
  }
 
+ function buildPartitionSummary(final) {
+  const card = document.createElement("div");
+  card.className = "ranking";
+  const who = document.createElement("div");
+  who.className = "who";
+  const strong = document.createElement("strong"); strong.textContent = "Partition result";
+  const whole = document.createElement("span");
+  whole.textContent = final.wholeArraySorted ? "whole array: sorted" : "whole array: NOT sorted";
+  whole.style.color = final.wholeArraySorted ? "var(--ok)" : "var(--muted)";
+  who.append(strong, whole);
+  const list = document.createElement("ol");
+  final.perParticipant.forEach((p) => {
+   const li = document.createElement("li");
+   if (p.error) {
+    li.className = "err";
+    li.textContent = `${raceLabel(p.you)} [${p.segmentStart}..${p.segmentStart + p.segmentLength - 1}] — error: ${p.error}`;
+   } else if (p.finishedCorrectly) {
+    li.className = "win";
+    li.textContent = `${raceLabel(p.you)} [${p.segmentStart}..${p.segmentStart + p.segmentLength - 1}] — segment sorted, ${p.roundsUsed} rounds`;
+   } else {
+    li.textContent = `${raceLabel(p.you)} [${p.segmentStart}..${p.segmentStart + p.segmentLength - 1}] — segment did not finish (${p.faults} faults)`;
+   }
+   list.append(li);
+  });
+  card.append(list);
+  if (!final.wholeArraySorted) {
+   const note = document.createElement("div");
+   note.style.marginTop = ".5rem"; note.style.fontSize = ".72rem"; note.style.color = "var(--muted)";
+   note.textContent = final.perParticipant.every((p) => p.finishedCorrectly)
+    ? "Every segment sorted correctly on its own — the whole array still isn't sorted because this splits by POSITION, not by value range. Concatenating locally-sorted slices only yields a globally sorted array if each slice happened to already hold the right value range (a real parallel sort needs a merge phase afterward, which this doesn't do)."
+    : "Not every segment finished sorted, so the whole array isn't either.";
+   card.append(note);
+  }
+  return card;
+ }
+
  function renderBoard() {
   if (!state.scores.size) return;
   els.board.innerHTML = "";
   if (state.mode === "race" && state.raceRanked && state.raceRanked.length) {
    els.board.append(buildRaceRanking(state.raceRanked));
   }
+  if (state.mode === "partition" && state.partitionFinal) {
+   els.board.append(buildPartitionSummary(state.partitionFinal));
+  }
   for (const s of state.scores.values()) {
    const card = document.createElement("div");
    card.className = "score" + (s.finishedCorrectly ? " correct" : "");
-   const accent = state.mode === "relay" ? attribColor(state.colorIndex.get(s.you) || 0) : theme.accent;
+   const accent = (state.mode === "relay" || state.mode === "partition") ? attribColor(state.colorIndex.get(s.you) || 0) : theme.accent;
    card.style.borderLeftColor = s.finishedCorrectly ? theme.ok : accent;
 
    const who = document.createElement("div");
@@ -666,20 +712,25 @@
 
    const m = document.createElement("div");
    m.className = "metrics";
-   const rows = [
+   const rows = [];
+   if (state.mode === "partition") {
+    const seg = state.segments.find((sg) => sg.you === s.you);
+    if (seg) rows.push(["segment", `[${seg.start}..${seg.start + seg.length - 1}]`, false]);
+   }
+   rows.push(
     ["comparisons", s.comparisons, false],
     ["swaps", s.swaps, false],
     ["faults", s.faults, s.faults > 0],
     [state.mode === "relay" ? "ticks" : "rounds", s.rounds, false],
-   ];
+   );
    if (s.wallClockMs != null) rows.push(["wall", (s.wallClockMs / 1000).toFixed(1) + "s", false]);
-   rows.push(["sorted", s.finishedCorrectly ? "yes" : "no", false]);
+   rows.push([state.mode === "partition" ? "segment sorted" : "sorted", s.finishedCorrectly ? "yes" : "no", false]);
    for (const [k, v, warn] of rows) {
     const d = document.createElement("div");
     if (warn) d.className = "has-faults";
     const kk = document.createElement("span"); kk.textContent = k;
     const vv = document.createElement("b"); vv.textContent = String(v);
-    if (k === "sorted" && s.finishedCorrectly) vv.style.color = theme.ok;
+    if ((k === "sorted" || k === "segment sorted") && s.finishedCorrectly) vv.style.color = theme.ok;
     d.append(kk, vv); m.append(d);
    }
 
@@ -691,7 +742,8 @@
    // the bridge reports a single `inversionsOverTime` for the session, not one per
    // participant. Say so, rather than implying each harness has its own signature here.
    const l1 = document.createElement("span");
-   l1.textContent = state.mode === "relay" ? "shared array · inversions" : "inversions over time";
+   l1.textContent = state.mode === "relay" ? "shared array · inversions"
+    : state.mode === "partition" ? "own segment · inversions" : "inversions over time";
    const l2 = document.createElement("span"); l2.textContent = s.inv.length ? String(s.inv[s.inv.length - 1]) : "—";
    lab.append(l1, l2);
    const spark = document.createElement("canvas");
@@ -766,15 +818,16 @@
   return hz > 0 ? Math.min(400, 1000 / hz) : 0;
  }
 
- // Relay's arena draws a coloured stripe under whichever slot each participant last touched
- // (drawArena, ATTRIB_H), but had no key anywhere on screen mapping a colour back to a name --
- // exactly the "what am I even looking at" gap this whole pass is fixing. `ids` is the relay
- // roster in the same order state.colorIndex assigns swatch colours from; pass null to hide it.
- function renderAttribLegend(ids) {
+ // The arena draws a coloured stripe under each slot (drawArena, ATTRIB_H) -- in partition mode
+ // that's a FIXED segment assignment, in relay mode it's whoever last touched that slot. Either
+ // way there was no key anywhere on screen mapping a colour back to a name -- exactly the "what
+ // am I even looking at" gap this whole pass is fixing. `ids` is the roster in the same order
+ // state.colorIndex assigns swatch colours from; pass null to hide the legend.
+ function renderAttribLegend(ids, captionText) {
   if (!ids || !ids.length) { els.attribLegend.hidden = true; els.attribLegend.innerHTML = ""; return; }
   els.attribLegend.innerHTML = "";
   const caption = document.createElement("span");
-  caption.textContent = "stripe colour = who last touched that slot:";
+  caption.textContent = captionText;
   caption.style.color = "var(--muted2)";
   els.attribLegend.append(caption);
   ids.forEach((you, k) => {
@@ -799,20 +852,47 @@
    state.sortedNow = isSorted(state.array);
    els.rampLo.textContent = String(state.vmin);
    els.rampHi.textContent = String(state.vmax);
-   const ids = (ev.mode === "relay" || ev.mode === "race") ? ev.participants : [ev.you];
+   const ids = (ev.mode === "relay" || ev.mode === "race" || ev.mode === "partition") ? ev.participants : [ev.you];
    ids.forEach((id, k) => state.colorIndex.set(id, k));
-   for (const id of ids) { const s = scoreFor(id); s.status = "running"; s.inv = [inversions(state.array)]; }
+   state.segments = ev.mode === "partition" ? ev.segments : [];
+   for (const id of ids) {
+    const s = scoreFor(id);
+    s.status = "running";
+    if (ev.mode === "partition") {
+     // Each participant's inversions are scoped to its OWN segment — a globally-computed
+     // inversion count on a partitioned array would mix in cross-segment disorder no single
+     // participant can do anything about.
+     const seg = state.segments.find((sg) => sg.you === id);
+     s.inv = [inversions(state.array.slice(seg.start, seg.start + seg.length))];
+    } else {
+     s.inv = [inversions(state.array)];
+    }
+   }
    if (ev.mode === "race") {
     // Every participant races an independent copy of this SAME array — track each one
     // separately, and give each its own live mini-arena on its scorecard (paintMiniArena)
     // instead of trying to animate N concurrent arrays in one shared canvas.
     state.raceArrays = new Map(ids.map((id) => [id, ev.initialArray.slice()]));
    }
+   if (ev.mode === "partition") {
+    // Segments never overlap, so — unlike race — everyone's fixed slice can be painted into
+    // ONE shared arena at once: colour every slot by which participant's segment it belongs
+    // to, for the whole run (not "last touched" the way relay's dynamic stripes work).
+    for (const seg of state.segments) {
+     const c = state.colorIndex.get(seg.you);
+     for (let i = seg.start; i < seg.start + seg.length; i++) state.owner[i] = c;
+    }
+   }
    const note = ev.mode === "race"
     ? " · shared starting point — each racer's own live array is on its scorecard below"
+    : ev.mode === "partition"
+    ? ` · split into ${state.segments.length} segments, one per participant, sorted independently`
     : "";
    els.title.textContent = `arena · ${state.mode} · n=${state.array.length} · [${state.initial.join(", ")}]${note}`;
-   renderAttribLegend(ev.mode === "relay" ? ids : null);
+   renderAttribLegend(
+    ev.mode === "relay" ? ids : ev.mode === "partition" ? ids : null,
+    ev.mode === "partition" ? "stripe colour = which participant owns that segment:" : "stripe colour = who last touched that slot:"
+   );
    log(`start ${state.mode} · ${ids.join(", ")} · [${state.initial.join(", ")}] · ${inversions(state.array)} inversions`, "sys");
    renderBoard();
    return;
@@ -830,8 +910,15 @@
    const n = ev.round != null ? ev.round : ev.tick;
    const tag = who && state.mode !== "solo" ? ` ${who}` : "";
    const isRace = state.mode === "race";
+   const isPartition = state.mode === "partition";
+   // Partition round events carry i/j LOCAL to that participant's own segment (it's just a
+   // normal solo run under the hood) — translate to global array indices for anything that
+   // touches the shared state.array/state.active, which the arena draws in global coordinates.
+   const segOffset = isPartition ? (ev.segmentStart || 0) : 0;
+   const gi = ev.i != null ? ev.i + segOffset : ev.i;
+   const gj = ev.j != null ? ev.j + segOffset : ev.j;
    // In race mode, every participant has its own independent array — read/mutate THAT one,
-   // never the single shared state.array relay/solo use.
+   // never the single shared state.array relay/partition/solo use.
    const arr = isRace && who ? state.raceArrays.get(who) : state.array;
    if (s) s.rounds = Math.max(s.rounds, n || 0);
 
@@ -843,19 +930,20 @@
    } else if (ev.action === "done") {
     state.timeline.push({ action: "done", who });
     if (isRace && who) state.raceActive.delete(who);
+    const doneText = isPartition ? "its segment is sorted" : "array is sorted";
     if (ev.actuallySorted) {
-     log(`r${String(n).padStart(3)}${tag} done — array is sorted`, "ok");
-     if (s) s.status = "finished";
+     log(`r${String(n).padStart(3)}${tag} done — ${doneText}`, "ok");
+     if (s) s.status = isPartition ? "segment sorted" : "finished";
     } else {
-     log(`r${String(n).padStart(3)}${tag} done claimed, but the array is NOT sorted — run continues`, "fault");
+     log(`r${String(n).padStart(3)}${tag} done claimed, but ${isPartition ? "its segment is" : "the array is"} NOT sorted — run continues`, "fault");
      if (s) s.status = "claimed done early";
     }
    } else if (ev.action === "compare") {
     if (s) s.comparisons++;
     state.timeline.push({ action: "compare", who });
     if (isRace && who) state.raceActive.set(who, { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() });
-    else if (!isRace) state.active = { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() };
-    log(`r${String(n).padStart(3)}${tag} compare ${ev.i} ${ev.j} → ${arr[ev.i]} vs ${arr[ev.j]}`);
+    else if (!isRace) state.active = { i: gi, j: gj, action: "compare", until: performance.now() + holdMs() };
+    log(`r${String(n).padStart(3)}${tag} compare ${gi} ${gj} → ${arr[gi]} vs ${arr[gj]}`);
    } else if (ev.action === "swap") {
     if (s) s.swaps++;
     state.timeline.push({ action: "swap", who });
@@ -867,23 +955,38 @@
      if (who) state.raceActive.set(who, { i: ev.i, j: ev.j, action: "swap", until: performance.now() + holdMs() });
     } else {
      if (ev.resultArray) state.array = ev.resultArray.slice();
-     else { const t = state.array[ev.i]; state.array[ev.i] = state.array[ev.j]; state.array[ev.j] = t; }
+     else { const t = state.array[gi]; state.array[gi] = state.array[gj]; state.array[gj] = t; }
      if (state.mode === "relay" && who != null) {
       const c = state.colorIndex.get(who);
       if (c != null) { state.owner[ev.i] = c; state.owner[ev.j] = c; }
      }
-     state.active = { i: ev.i, j: ev.j, action: "swap", until: performance.now() + holdMs() };
+     // Partition's ownership stripes are fixed at start (a whole segment belongs to one
+     // participant for the entire run) — never overwritten per-move the way relay's are.
+     state.active = { i: gi, j: gj, action: "swap", until: performance.now() + holdMs() };
      if (!reduceMotion.matches && Number(els.pace.value) > 0) {
-      state.anim = { i: ev.i, j: ev.j, t0: performance.now(), dur: Math.min(260, 1000 / Number(els.pace.value)) };
+      state.anim = { i: gi, j: gj, t0: performance.now(), dur: Math.min(260, 1000 / Number(els.pace.value)) };
      }
      state.sortedNow = isSorted(state.array);
     }
     const curArr = isRace ? state.raceArrays.get(who) : state.array;
-    const inv = inversions(curArr);
-    if (state.mode === "relay") { for (const sc of state.scores.values()) sc.inv.push(inv); }
-    else if (s) s.inv.push(inv);
-    if (!isRace) els.pillInv.textContent = `inversions ${inv}`;
-    log(`r${String(n).padStart(3)}${tag} swap ${ev.i} ${ev.j} → [${curArr.join(", ")}] · ${inv} inv`, "swap");
+    let scoreInv;
+    if (isPartition && who) {
+     // Scoped to THIS participant's own segment — a globally-computed inversion count on a
+     // partitioned array would mix in cross-segment disorder no single participant controls.
+     const seg = state.segments.find((sg) => sg.you === who);
+     scoreInv = inversions(curArr.slice(seg.start, seg.start + seg.length));
+     if (s) s.inv.push(scoreInv);
+     els.pillInv.textContent = `whole-array inversions ${inversions(curArr)}`;
+    } else if (state.mode === "relay") {
+     scoreInv = inversions(curArr);
+     for (const sc of state.scores.values()) sc.inv.push(scoreInv);
+     els.pillInv.textContent = `inversions ${scoreInv}`;
+    } else {
+     scoreInv = inversions(curArr);
+     if (s) s.inv.push(scoreInv);
+     if (!isRace) els.pillInv.textContent = `inversions ${scoreInv}`;
+    }
+    log(`r${String(n).padStart(3)}${tag} swap ${gi} ${gj} → [${curArr.join(", ")}] · ${scoreInv} inv`, "swap");
    }
    renderBoard();
    return;
@@ -904,6 +1007,28 @@
    const winner = state.raceRanked.find((r) => r.finishedCorrectly);
    setPill(els.pillState, winner ? "done" : "bad", winner ? `winner: ${raceLabel(winner.you)}` : "no finisher");
    log(`final race · ${results.length} participants · winner: ${winner ? raceLabel(winner.you) : "none"}`, winner ? "ok" : "fault");
+   state.finished = true;
+   renderBoard();
+   return;
+  }
+
+  if (ev.stage === "final" && state.mode === "partition") {
+   if (ev.finalArray) { state.array = ev.finalArray.slice(); state.sortedNow = isSorted(state.array); }
+   for (const p of ev.perParticipant || []) {
+    const s = scoreFor(p.you);
+    s.comparisons = p.comparisons; s.swaps = p.swaps; s.faults = p.faults;
+    s.rounds = p.roundsUsed; s.wallClockMs = p.wallClockMs;
+    s.finishedCorrectly = !!p.finishedCorrectly;
+    s.status = p.error ? `error: ${p.error}` : (s.finishedCorrectly ? "segment sorted" : (p.faults ? "gave up · faults" : "budget exhausted"));
+   }
+   state.partitionFinal = { wholeArraySorted: !!ev.wholeArraySorted, perParticipant: ev.perParticipant || [] };
+   els.pillInv.textContent = `whole-array inversions ${inversions(state.array)}`;
+   const allSegmentsOk = (ev.perParticipant || []).every((p) => p.finishedCorrectly);
+   setPill(els.pillState, ev.wholeArraySorted ? "done" : allSegmentsOk ? null : "bad",
+    ev.wholeArraySorted ? "whole array sorted" : allSegmentsOk ? "segments sorted, whole array isn't" : "not all segments sorted");
+   log(`final [${state.array.join(", ")}] · whole array ${ev.wholeArraySorted ? "sorted" : "NOT sorted"} · ` +
+       `${(ev.perParticipant || []).filter((p) => p.finishedCorrectly).length}/${(ev.perParticipant || []).length} segments sorted`,
+       ev.wholeArraySorted ? "ok" : allSegmentsOk ? "sys" : "fault");
    state.finished = true;
    renderBoard();
    return;
@@ -941,7 +1066,7 @@
  }
 
  function finishRun() {
-  els.solo.disabled = false; els.relay.disabled = false; els.race.disabled = false; els.stop.disabled = true;
+  els.solo.disabled = false; els.partition.disabled = false; els.race.disabled = false; els.stop.disabled = true;
   syncButtons();
   if (!state.finished) setPill(els.pillState, null, "idle");
   els.status.textContent = state.finished ? "run complete." : "stopped.";
@@ -987,13 +1112,14 @@
   state.active = null; state.anim = null; state.timeline = [];
   state.scores = new Map(); state.colorIndex = new Map();
   state.raceArrays = new Map(); state.raceActive = new Map(); state.raceRanked = null;
+  state.segments = []; state.partitionFinal = null;
   queue.length = 0; logLines = 0;
   els.log.innerHTML = ""; els.logCount.textContent = "";
   els.board.innerHTML = "";
   els.attribLegend.hidden = true; els.attribLegend.innerHTML = "";
   els.pillInv.textContent = "inversions —";
   setPill(els.pillState, "live", "running");
-  els.solo.disabled = true; els.relay.disabled = true; els.race.disabled = true; els.stop.disabled = false;
+  els.solo.disabled = true; els.partition.disabled = true; els.race.disabled = true; els.stop.disabled = false;
  }
 
  async function run(mode) {
@@ -1005,13 +1131,13 @@
    ? `running ${ids[0]} on a fresh array of ${len}…`
    : mode === "race"
    ? `racing ${ids.length} participants head-to-head on an identical array of ${len}…`
-   : `running relay with ${ids.length} participants on a fresh array of ${len}…`;
+   : `splitting an array of ${len} across ${ids.length} participants, one segment each…`;
   startPump();
   const url = mode === "solo"
    ? `/run/${encodeURIComponent(ids[0])}?len=${len}`
    : mode === "race"
    ? `/race?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`
-   : `/relay?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`;
+   : `/partition?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`;
   try {
    await stream(url);
   } catch (e) {
@@ -1027,8 +1153,8 @@
   if (state.running) return;
   els.solo.disabled = !state.soloParticipant;
   const n = state.selected.size;
-  els.relay.disabled = n < 2;
-  els.relay.textContent = n >= 2 ? `Relay run · ${n}` : "Relay run";
+  els.partition.disabled = n < 2;
+  els.partition.textContent = n >= 2 ? `Partition run · ${n}` : "Partition run";
   els.race.disabled = n < 2;
   els.race.textContent = n >= 2 ? `Race run · ${n}` : "Race run";
  }
@@ -1118,7 +1244,7 @@
 
  els.soloSelect.addEventListener("change", () => { state.soloParticipant = els.soloSelect.value; syncButtons(); });
  els.solo.addEventListener("click", () => run("solo"));
- els.relay.addEventListener("click", () => run("relay"));
+ els.partition.addEventListener("click", () => run("partition"));
  els.race.addEventListener("click", () => run("race"));
  els.stop.addEventListener("click", () => {
   if (state.abort) state.abort.abort();

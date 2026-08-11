@@ -347,6 +347,101 @@ async function runRelaySession({ getOnlineParticipants, initialArray, budget = D
 }
 
 /**
+ * Split `array` into `n` contiguous, near-equal segments, left segments absorbing the remainder
+ * (length 100 split 3 ways -> 34, 33, 33, matching the natural way you'd hand out 100 items to 3
+ * workers by hand). Pure and tiny on purpose — this is the one piece of partition mode's logic
+ * worth unit-testing in isolation from the concurrency around it.
+ */
+function splitEven(array, n) {
+  const len = array.length;
+  const base = Math.floor(len / n);
+  const rem = len % n;
+  const segments = [];
+  let offset = 0;
+  for (let i = 0; i < n; i++) {
+    const size = base + (i < rem ? 1 : 0);
+    segments.push({ start: offset, array: array.slice(offset, offset + size) });
+    offset += size;
+  }
+  return segments;
+}
+
+/**
+ * Partition mode: the array is split by POSITION (not by value) into one contiguous segment per
+ * participant, and each sorts only its own segment — independently, concurrently, no shared
+ * state, exactly like an independent solo run against a smaller array. Segments never overlap,
+ * so — unlike race mode's N genuinely independent full-length arrays — every participant's
+ * progress can legitimately be drawn into ONE shared picture at once: segment i always occupies
+ * the same fixed slice of the whole array.
+ *
+ * Honesty matters here: because segments are split by position, not by value range, sorting
+ * every segment individually does NOT generally make the reassembled whole array sorted (e.g.
+ * segment 1 = [50,60,70], segment 2 = [10,20,30] — each internally sorted, concatenated is not).
+ * `wholeArraySorted` reports the real answer rather than implying success from "every segment
+ * finished correctly" — a real parallel/partitioned sort needs a merge phase afterward, which
+ * this deliberately does not implement (out of scope; the point here is watching N segments sort
+ * concurrently, not delivering a working parallel sort algorithm).
+ */
+async function runPartitionSession({ participants, initialArray, budget = DEFAULT_BUDGET, onRound = () => {} }) {
+  if (!Array.isArray(participants) || participants.length < 2) {
+    throw new Error("runPartitionSession needs at least two participants");
+  }
+  if (initialArray.length > MAX_ARRAY_LEN) {
+    throw new Error(`array length ${initialArray.length} exceeds MAX_ARRAY_LEN (${MAX_ARRAY_LEN})`);
+  }
+  if (initialArray.length < participants.length) {
+    throw new Error(`array length ${initialArray.length} is smaller than the number of participants (${participants.length}) -- each needs at least one element`);
+  }
+
+  const segments = splitEven(initialArray, participants.length);
+
+  const results = await Promise.all(
+    participants.map((p, idx) => {
+      const seg = segments[idx];
+      return runSoloRun({
+        you: p.you,
+        initialArray: seg.array,
+        budget,
+        callHandler: p.callHandler,
+        onRound: (entry) => onRound({ you: p.you, segmentStart: seg.start, segmentLength: seg.array.length, ...entry }),
+      }).catch((e) => ({
+        you: p.you,
+        error: e.message || String(e),
+        finishedCorrectly: false,
+        finalArray: seg.array,
+        roundsUsed: null,
+        wallClockMs: null,
+        comparisons: null,
+        swaps: null,
+        faults: null,
+      }));
+    })
+  );
+
+  const finalArray = results.flatMap((r) => r.finalArray || []);
+  const perParticipant = results.map((r, idx) => ({
+    you: r.you,
+    segmentStart: segments[idx].start,
+    segmentLength: segments[idx].array.length,
+    finishedCorrectly: !!r.finishedCorrectly,
+    roundsUsed: r.roundsUsed ?? null,
+    wallClockMs: r.wallClockMs ?? null,
+    comparisons: r.comparisons ?? null,
+    swaps: r.swaps ?? null,
+    faults: r.faults ?? null,
+    error: r.error || null,
+  }));
+
+  return {
+    initialArray,
+    segments: segments.map((s, i) => ({ you: participants[i].you, start: s.start, length: s.array.length })),
+    finalArray,
+    wholeArraySorted: isSorted(finalArray),
+    perParticipant,
+  };
+}
+
+/**
  * Race mode (CADS-DEMO-sort redesign): same seed array handed to N participants, each running
  * an independent, unmodified solo session -- unlike relay, they never see each other's moves, and
  * unlike relay's tick-by-tick shared array they run fully concurrently. `participants` is an
@@ -418,4 +513,6 @@ module.exports = {
   runRelayTick,
   runRelaySession,
   runRaceSession,
+  splitEven,
+  runPartitionSession,
 };

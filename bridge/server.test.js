@@ -13,6 +13,8 @@ const {
   runRelayTick,
   runRelaySession,
   runRaceSession,
+  splitEven,
+  runPartitionSession,
   MAX_ARRAY_LEN,
 } = require("./server.lib.js");
 
@@ -526,4 +528,144 @@ test("runRaceSession: a callHandler that throws synchronously (real spawn failur
   // "broken" still resolves a normal (if all-faults) result here, not an `error` entry -- this
   // test's real purpose is confirming one participant's misbehavior never takes the other down.
   assert.ok(result.ranked.find((r) => r.you === "broken"));
+});
+
+// ---- partition mode: split by position, each participant sorts only its own segment ----
+
+test("splitEven: 100 elements split 3 ways gives 34/33/33, left segments absorbing the remainder", () => {
+  const segments = splitEven(Array.from({ length: 100 }, (_, i) => i), 3);
+  assert.deepEqual(segments.map((s) => s.array.length), [34, 33, 33]);
+  assert.equal(segments[0].start, 0);
+  assert.equal(segments[1].start, 34);
+  assert.equal(segments[2].start, 67);
+  // contiguous and non-overlapping: concatenating the segments recovers the original array
+  assert.deepEqual(segments.flatMap((s) => s.array), Array.from({ length: 100 }, (_, i) => i));
+});
+
+test("splitEven: an exact multiple splits perfectly even with no remainder", () => {
+  const segments = splitEven(Array.from({ length: 9 }, (_, i) => i), 3);
+  assert.deepEqual(segments.map((s) => s.array.length), [3, 3, 3]);
+});
+
+test("runPartitionSession: requires at least two participants", async () => {
+  await assert.rejects(
+    () => runPartitionSession({ participants: [{ you: "solo", callHandler: async () => JSON.stringify({ action: "done" }) }], initialArray: [1, 2], budget: 5 }),
+    /at least two participants/
+  );
+});
+
+test("runPartitionSession: rejects fewer array elements than participants", async () => {
+  const p = { you: "x", callHandler: async () => JSON.stringify({ action: "done" }) };
+  await assert.rejects(
+    () => runPartitionSession({ participants: [p, p, p], initialArray: [1, 2], budget: 5 }),
+    /smaller than the number of participants/
+  );
+});
+
+test("runPartitionSession: each participant only ever sees its OWN segment, never the whole array", async () => {
+  const seenArrays = { a: [], b: [] };
+  const makeHandler = (you) => ({
+    you,
+    callHandler: async (input) => {
+      seenArrays[you].push(input.array.slice());
+      return JSON.stringify({ action: "done" });
+    },
+  });
+  await runPartitionSession({
+    participants: [makeHandler("a"), makeHandler("b")],
+    initialArray: [5, 3, 8, 1, 9, 2],
+    budget: 5,
+  });
+  assert.deepEqual(seenArrays.a[0], [5, 3, 8], "first segment gets the first 3 elements");
+  assert.deepEqual(seenArrays.b[0], [1, 9, 2], "second segment gets the remaining 3 elements");
+});
+
+test("runPartitionSession: two participants that each sort their own segment reassemble into a fully sorted array here (segments happen to already be range-ordered)", async () => {
+  const makeSelectionSorter = (you) => ({
+    you,
+    callHandler: async (input) => {
+      const arr = input.array;
+      for (let i = 0; i < arr.length - 1; i++) {
+        let m = i;
+        for (let k = i + 1; k < arr.length; k++) if (arr[k] < arr[m]) m = k;
+        if (m !== i) return JSON.stringify({ action: "swap", i, j: m });
+      }
+      return JSON.stringify({ action: "done" });
+    },
+  });
+  // Deliberately range-partitioned input: segment 1 is entirely smaller than segment 2, so
+  // sorting each independently DOES yield a globally sorted whole here -- the honest opposite
+  // case (position-partitioned, NOT range-partitioned) is covered by the next test.
+  const result = await runPartitionSession({
+    participants: [makeSelectionSorter("lo"), makeSelectionSorter("hi")],
+    initialArray: [3, 1, 2, 60, 40, 50],
+    budget: 20,
+  });
+  assert.equal(result.perParticipant[0].finishedCorrectly, true);
+  assert.equal(result.perParticipant[1].finishedCorrectly, true);
+  assert.deepEqual(result.finalArray, [1, 2, 3, 40, 50, 60]);
+  assert.equal(result.wholeArraySorted, true);
+});
+
+test("runPartitionSession: every segment individually sorted does NOT imply the reassembled whole array is sorted (position-partitioned, not range-partitioned)", async () => {
+  const makeSelectionSorter = (you) => ({
+    you,
+    callHandler: async (input) => {
+      const arr = input.array;
+      for (let i = 0; i < arr.length - 1; i++) {
+        let m = i;
+        for (let k = i + 1; k < arr.length; k++) if (arr[k] < arr[m]) m = k;
+        if (m !== i) return JSON.stringify({ action: "swap", i, j: m });
+      }
+      return JSON.stringify({ action: "done" });
+    },
+  });
+  // segment 1 = [60,70,50] (all LARGE values), segment 2 = [1,2,0] (all SMALL values) -- each
+  // sorts perfectly on its own, but concatenated the whole is nowhere close to sorted.
+  const result = await runPartitionSession({
+    participants: [makeSelectionSorter("first"), makeSelectionSorter("second")],
+    initialArray: [60, 70, 50, 1, 2, 0],
+    budget: 20,
+  });
+  assert.equal(result.perParticipant[0].finishedCorrectly, true);
+  assert.equal(result.perParticipant[1].finishedCorrectly, true);
+  assert.deepEqual(result.finalArray, [50, 60, 70, 0, 1, 2]);
+  assert.equal(result.wholeArraySorted, false, "every segment sorted individually is NOT the same as the whole array being sorted");
+});
+
+test("runPartitionSession: onRound tags every event with its participant AND that segment's global offset", async () => {
+  const makeHandler = (you) => ({
+    you,
+    callHandler: async (input) => JSON.stringify({ action: "swap", i: 0, j: input.array.length - 1 }),
+  });
+  const seen = [];
+  await runPartitionSession({
+    participants: [makeHandler("a"), makeHandler("b")],
+    initialArray: [4, 3, 2, 1],
+    budget: 1,
+    onRound: (entry) => seen.push(entry),
+  });
+  const aEvent = seen.find((e) => e.you === "a");
+  const bEvent = seen.find((e) => e.you === "b");
+  assert.equal(aEvent.segmentStart, 0);
+  assert.equal(bEvent.segmentStart, 2);
+});
+
+test("runPartitionSession: a broken participant's segment never sorting doesn't take the other segments down", async () => {
+  // runSoloRun already turns a throwing callHandler into per-round faults rather than
+  // rejecting (confirmed by the equivalent runRaceSession test above), so this segment
+  // resolves normally here too -- just never finishing, budget spent as faults.
+  const broken = { you: "broken", callHandler: async () => { throw new Error("spawn ENOENT"); } };
+  const fine = {
+    you: "fine",
+    callHandler: async (input) => {
+      const arr = input.array;
+      for (let i = 0; i < arr.length - 1; i++) if (arr[i] > arr[i + 1]) return JSON.stringify({ action: "swap", i, j: i + 1 });
+      return JSON.stringify({ action: "done" });
+    },
+  };
+  const result = await runPartitionSession({ participants: [broken, fine], initialArray: [9, 1, 8, 2], budget: 5 });
+  assert.equal(result.perParticipant[1].finishedCorrectly, true);
+  assert.equal(result.perParticipant[0].finishedCorrectly, false);
+  assert.equal(result.perParticipant[0].faults, 5, "the broken segment burns its whole budget as faults, not silently vanishing");
 });

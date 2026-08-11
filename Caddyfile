@@ -22,7 +22,7 @@
 		X-Content-Type-Options "nosniff"
 	}
 
-	@api path /run/* /relay /race /participants /healthz
+	@api path /run/* /relay /race /partition /participants /healthz
 	reverse_proxy @api sort-demo-bridge:8789
 
 	root * /srv

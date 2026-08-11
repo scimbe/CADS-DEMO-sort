@@ -28,6 +28,7 @@ const {
   runSoloRun,
   runRelaySession,
   runRaceSession,
+  runPartitionSession,
 } = require("./server.lib.js");
 
 const LISTEN = process.env.SORT_BRIDGE_LISTEN || "0.0.0.0:8789";
@@ -186,6 +187,60 @@ async function handleRace(req, res, participants, ids, query) {
   res.end();
 }
 
+/** Partition mode: the array is split by position into one contiguous segment per participant,
+ *  each sorting only its own slice, independently and concurrently. Segments never overlap, so
+ *  every participant's own live progress can be drawn into one shared arena at fixed offsets
+ *  (unlike race mode's genuinely independent full-length arrays). Orchestration lives in
+ *  runPartitionSession (server.lib.js) so it's testable with stub handlers. */
+async function handlePartition(req, res, participants, ids, query) {
+  const chosen = [];
+  for (const id of ids) {
+    const config = participants.get(id);
+    if (!config) return jsonError(res, 404, `unknown participant "${id}"`);
+    chosen.push(config);
+  }
+  if (chosen.length < 2) return jsonError(res, 400, "at least two participant ids required (?ids=a,b,c)");
+  const len = Math.min(Math.max(Number(query.get("len")) || 8, 2), MAX_ARRAY_LEN);
+  const initialArray = randomArray(len);
+
+  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
+
+  try {
+    const segments = []; // filled in below, but participants need to know their own segment before the first round event
+    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: (input) => callHandlerProcess(c.cmd, input) }));
+    // Compute segment boundaries the same way runPartitionSession will, purely so the "start"
+    // event can tell the browser where each participant's slice sits before any rounds arrive.
+    const base = Math.floor(initialArray.length / chosen.length);
+    const rem = initialArray.length % chosen.length;
+    let offset = 0;
+    for (let i = 0; i < chosen.length; i++) {
+      const size = base + (i < rem ? 1 : 0);
+      segments.push({ you: chosen[i].you, start: offset, length: size });
+      offset += size;
+    }
+    sendNdjson(res, { stage: "start", mode: "partition", participants: chosen.map((c) => c.you), initialArray, segments });
+
+    const result = await runPartitionSession({
+      participants: chosenWithHandlers,
+      initialArray,
+      budget: BUDGET,
+      onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
+    });
+    sendNdjson(res, {
+      stage: "final",
+      mode: "partition",
+      initialArray: result.initialArray,
+      segments: result.segments,
+      finalArray: result.finalArray,
+      wholeArraySorted: result.wholeArraySorted,
+      perParticipant: result.perParticipant,
+    });
+  } catch (e) {
+    sendNdjson(res, { stage: "error", message: e.message || String(e) });
+  }
+  res.end();
+}
+
 async function handleRelay(req, res, participants, ids, query) {
   const chosen = [];
   for (const id of ids) {
@@ -267,6 +322,11 @@ function main() {
       handleRace(req, res, participants, ids, url.searchParams);
       return;
     }
+    if (req.method === "POST" && url.pathname === "/partition") {
+      const ids = (url.searchParams.get("ids") || "").split(",").map((s) => s.trim()).filter(Boolean);
+      handlePartition(req, res, participants, ids, url.searchParams);
+      return;
+    }
     jsonError(res, 404, "not found");
   });
   const [host, port] = LISTEN.split(":");
@@ -277,4 +337,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { loadParticipants, callHandlerProcess, randomArray, handleRace, handleRelay, handleRun };
+module.exports = { loadParticipants, callHandlerProcess, randomArray, handleRace, handlePartition, handleRelay, handleRun };
