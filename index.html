@@ -182,8 +182,12 @@
  <div id="notice" hidden class="notice"></div>
 
  <div class="controls">
+  <div class="ctl">
+   <label for="solo-participant">Solo participant</label>
+   <select id="solo-participant"><option>loading…</option></select>
+  </div>
   <fieldset class="roster">
-   <legend>Participants</legend>
+   <legend>Relay participants (pick 2+)</legend>
    <div class="chips" id="roster"><span class="pill"><i></i>loading…</span></div>
   </fieldset>
   <div class="ctl">
@@ -278,7 +282,7 @@
 
  const $ = (id) => document.getElementById(id);
  const els = {
-  roster: $("roster"), len: $("len"), pace: $("pace"),
+  roster: $("roster"), soloSelect: $("solo-participant"), len: $("len"), pace: $("pace"),
   solo: $("run-solo"), relay: $("run-relay"), stop: $("stop"),
   arena: $("arena"), timeline: $("timeline"), ramp: $("ramp"),
   board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
@@ -363,7 +367,12 @@
 
  // ----------------------------------------------------------------- state ----
  const state = {
-  roster: [], selected: new Set(), colorIndex: new Map(), rosterLoaded: false,
+  // `selected` is relay-only (2+ opt-in checkboxes). `soloParticipant` is a single string,
+  // never empty once the roster has loaded -- a <select> can't represent "nothing chosen" the
+  // ambiguous way a checkbox list can, which is the actual fix for CADS-DEMO-sort#13: the old
+  // single-Set design let a solo run land at 0 selected (both run buttons dead) or 2+ selected
+  // (which of the two would "Solo run" even use?) depending on click order.
+  roster: [], selected: new Set(), soloParticipant: null, colorIndex: new Map(), rosterLoaded: false,
   mode: null, running: false, abort: null,
   array: [], initial: [], vmin: 1, vmax: 99,
   owner: [],            // relay only: index into the attribution palette per slot
@@ -800,7 +809,7 @@
  }
 
  async function run(mode) {
-  const ids = [...state.selected];
+  const ids = mode === "solo" ? [state.soloParticipant] : [...state.selected];
   const len = Math.min(24, Math.max(2, Number(els.len.value) || 8));
   els.len.value = String(len);
   resetRun(mode);
@@ -824,9 +833,28 @@
  // ------------------------------------------------------------------- UI ----
  function syncButtons() {
   if (state.running) return;
-  els.solo.disabled = state.selected.size !== 1;
+  els.solo.disabled = !state.soloParticipant;
   els.relay.disabled = state.selected.size < 2;
   els.relay.textContent = state.selected.size >= 2 ? `Relay run · ${state.selected.size}` : "Relay run";
+ }
+
+ // Solo picker: a real <select>, not a checkbox -- structurally cannot be "0 selected" or
+ // "2 selected" once the roster has loaded, unlike the relay chips below (CADS-DEMO-sort#13).
+ function renderSoloSelect() {
+  const prev = state.soloParticipant;
+  els.soloSelect.innerHTML = "";
+  if (!state.roster.length) {
+   els.soloSelect.append(new Option("no participants configured on the bridge", ""));
+   state.soloParticipant = null;
+   syncButtons();
+   return;
+  }
+  state.roster.forEach((p) => els.soloSelect.append(new Option(p.label, p.you)));
+  // Keep the previous choice if it's still on the roster; otherwise fall back to the first
+  // entry. Either way soloParticipant ends up a real, currently-valid id -- never empty.
+  state.soloParticipant = state.roster.some((p) => p.you === prev) ? prev : state.roster[0].you;
+  els.soloSelect.value = state.soloParticipant;
+  syncButtons();
  }
 
  function renderRoster() {
@@ -866,19 +894,23 @@
    if (!res.ok) throw new Error(`HTTP ${res.status}`);
    state.roster = await res.json();
    const liveIds = new Set(state.roster.map((p) => p.you));
-   // CADS-DEMO-sort#13: only seed a default selection on the very first successful load, and
-   // only drop a selected id here if we're not mid-run — otherwise a background re-poll (below)
-   // silently re-adds an unchecked participant (default-selecting roster[0] unconditionally on
-   // every call) or yanks the selection out from under an active run.
-   if (!state.rosterLoaded && state.roster.length) state.selected.add(state.roster[0].you);
+   // CADS-DEMO-sort#13: relay's checkbox selection is only pruned here (never seeded with a
+   // default -- relay is an explicit opt-in, unlike solo which always needs *some* value) and
+   // only while no run is in progress, so a background re-poll can't yank a selection out from
+   // under an active run.
    if (!state.running) {
     for (const id of [...state.selected]) if (!liveIds.has(id)) state.selected.delete(id);
    }
    state.rosterLoaded = true;
    renderRoster();
+   renderSoloSelect();
    els.status.textContent = `${state.roster.length} participant(s) configured on the bridge.`;
   } catch (e) {
    els.roster.innerHTML = "";
+   els.soloSelect.innerHTML = "";
+   els.soloSelect.append(new Option("bridge unreachable", ""));
+   state.soloParticipant = null;
+   syncButtons();
    els.notice.hidden = false;
    els.notice.innerHTML =
     "The bridge is not reachable from this page (<code>GET /participants</code> failed: " +
@@ -889,6 +921,7 @@
   }
  }
 
+ els.soloSelect.addEventListener("change", () => { state.soloParticipant = els.soloSelect.value; syncButtons(); });
  els.solo.addEventListener("click", () => run("solo"));
  els.relay.addEventListener("click", () => run("relay"));
  els.stop.addEventListener("click", () => {
