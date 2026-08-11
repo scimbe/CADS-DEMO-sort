@@ -1,17 +1,16 @@
 #!/usr/bin/env bash
-# participants/algorithm-coached-claude/handler.sh — same model, coached strategy (CADS-DEMO-sort#5).
+# participants/algorithm-coached-claude/handler.sh — thin exec wrapper, two-stage harness.
+#
+# The LLM's job is to WRITE this participant's sorting code once (generate.sh), not to decide
+# moves live. This file makes NO `claude -p` call — it just runs the already-generated,
+# already-verified program at generated/handler.py against the real round input on every call.
 #
 # Contract: one round-input JSON object on stdin -> exactly one move JSON object on stdout,
-# per docs/protocol.md. Point CT_LLM_CMD at your non-interactive LLM CLI (default: `claude`).
-#
-# Context comes from participants/CLAUDE.md (shared protocol contract) plus this directory's own
-# AGENTS.md/CLAUDE.md (strategy — selection sort by direct placement), via Claude Code's native
-# project-file auto-discovery: `cd` into this directory, no hand-built --append-system-prompt
-# string, no manual `cat SKILL.md`. See participants/minimal-claude/handler.sh for the same
-# pattern with commentary on why (CADS-DEMO-sort#11).
-#
-# No hardcoded-move fallback, on purpose — see participants/minimal-claude/handler.sh.
-set -uo pipefail
+# per docs/protocol.md. Run generate.sh once (or whenever AGENTS.md changes) before using this.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GENERATED="$HERE/generated/handler.py"
 
 # Windows ships `python`/`py`, not `python3` -- and `command -v python3` is NOT enough to detect
 # that (CADS-DEMO-sort-docs#1, second round): a real, executable Microsoft Store alias stub named
@@ -23,33 +22,21 @@ for c in python3 python py; do
 done
 [ -n "$PY" ] || { echo "handler: no working python3/python/py found on PATH" >&2; exit 1; }
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-extract_move_json() {
-  local flat
-  flat="$(tr -d '\n')"
-  printf '%s' "$flat" | grep -o '{[^{}]*"action"[^{}]*}' | tail -1
-}
-
 if [ "${1:-}" = "--selftest" ]; then
-  [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
-  [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
-  grep -q 'action.*swap' "$HERE/AGENTS.md" || { echo "SELFTEST FAIL: AGENTS.md does not teach the move format" >&2; exit 1; }
-  got="$(printf '{\n  "action": "swap",\n  "i": 0,\n  "j": 3\n}\n' | extract_move_json)"
-  printf '%s' "$got" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"swap","i":0,"j":3}, m' \
-    || { echo "SELFTEST FAIL: extraction did not recover the move" >&2; exit 1; }
-  echo "SELFTEST OK: algorithm-coached-claude has AGENTS.md/CLAUDE.md and extracts multi-line moves"
+  [ -f "$GENERATED" ] || {
+    echo "SELFTEST FAIL: $GENERATED does not exist yet -- run generate.sh first" >&2
+    exit 1
+  }
+  out="$(printf '%s' '{"round":1,"array":[3,1,2],"history":[],"budgetRemaining":10,"mode":"solo","you":"algorithm-coached-claude"}' | "$PY" "$GENERATED")"
+  echo "$out" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m["action"] in ("compare","swap","done"), m' \
+    || { echo "SELFTEST FAIL: generated handler did not emit a valid move" >&2; exit 1; }
+  echo "SELFTEST OK: algorithm-coached-claude's generated handler emits a valid move for a real round input"
   exit 0
 fi
 
-LLM="${CT_LLM_CMD:-claude}"
-INPUT="$(cat)"
+[ -f "$GENERATED" ] || {
+  echo "handler: $GENERATED does not exist yet -- run generate.sh first" >&2
+  exit 1
+}
 
-OUT="$(cd "$HERE" && "$LLM" -p "$INPUT" --output-format text \
-  --disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent" 2>/dev/null)" || OUT=""
-
-MOVE="$(printf '%s' "$OUT" | extract_move_json)"
-if [ -n "$MOVE" ]; then
-  printf '%s\n' "$MOVE"
-fi
-exit 0
+exec "$PY" "$GENERATED"

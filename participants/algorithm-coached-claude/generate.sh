@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
-# participants/bubble-sort-claude/generate.sh — writes generated/handler.py ONCE.
+# participants/algorithm-coached-claude/generate.sh — writes generated/handler.py ONCE.
 #
-# This is the two-stage harness (CADS-DEMO-sort redesign): the LLM's job is to WRITE the
-# sorting code, not to decide moves live at inference time. Run this once (at onboarding, or
-# whenever AGENTS.md changes) to produce a real, self-contained, deterministic Python program at
-# generated/handler.py. handler.sh then just execs that file on every round — no `claude -p`
-# call happens during a live run anymore.
-#
-# GOAL/CONTEXT/CONSTRAINTS/OUTPUT framing, per CADS-DEMO-sort-docs/_explanation/instruction-structure.md.
+# Same two-stage harness as bubble-sort-claude/generate.sh: the LLM writes this participant's
+# selection-sort-by-direct-placement strategy as real, deterministic code, once, instead of
+# deciding moves live every round. See that file for the fuller header comment on why.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,14 +16,14 @@ AGENTS_MD="$(cat "$HERE/AGENTS.md")"
 PROTOCOL_MD="$(cat "$HERE/../CLAUDE.md")"
 
 # The QUOTED heredoc delimiter ('TEMPLATE_EOF') is load-bearing, not stylistic: AGENTS.md is
-# ordinary markdown, full of single-backtick code spans (`array`, `k`, ...). An UNQUOTED heredoc
-# here would have bash treat every backtick PAIR as command substitution when the placeholders
-# below get expanded into it, silently running e.g. `array` as a shell command and corrupting the
-# prompt with garbage/empty text instead of the real markdown -- exactly the kind of harness
-# unreliability this whole two-stage design exists to catch. Quoting the delimiter disables all
-# interpolation in the template; the two placeholders are substituted afterward via plain string
-# replacement (${var//search/replacement}), which never re-interprets the replacement text as
-# shell, however many backticks or `$` characters it contains.
+# ordinary markdown, full of single-backtick code spans (`array`, `p`, `m`, ...). An UNQUOTED
+# heredoc here would have bash treat every backtick PAIR as command substitution when the
+# placeholders below get expanded into it, silently running e.g. `array` as a shell command and
+# corrupting the prompt with garbage/empty text instead of the real markdown -- exactly the kind
+# of harness unreliability this whole two-stage design exists to catch. Quoting the delimiter
+# disables all interpolation in the template; the two placeholders are substituted afterward via
+# plain string replacement (${var//search/replacement}), which never re-interprets the
+# replacement text as shell, however many backticks or `$` characters it contains.
 TEMPLATE="$(cat <<'TEMPLATE_EOF'
 GOAL
 Write a single, complete, self-contained Python 3 program that implements the sorting strategy
@@ -39,7 +35,7 @@ CONTEXT
 Shared move-protocol contract (docs/protocol.md, restated via participants/CLAUDE.md):
 __PROTOCOL_MD__
 
-Strategy this participant must implement (bubble sort, coached, stateless-per-invocation):
+Strategy this participant must implement (selection sort by direct placement, stateless-per-invocation):
 __AGENTS_MD__
 
 CONSTRAINTS
@@ -47,9 +43,10 @@ CONSTRAINTS
   after, no explanation. The very first character of your output must be Python code.
 - The program must use only the Python standard library (json, sys). No third-party imports,
   no network access, no file I/O beyond stdin/stdout.
-- It must read the ENTIRE round-input JSON object from stdin (json.load(sys.stdin)), reconstruct
-  the cursor from history exactly as AGENTS.md describes, and write exactly one JSON object to
-  stdout via print(json.dumps(...)) — no trailing extra output, no debug prints.
+- It must read the ENTIRE round-input JSON object from stdin (json.load(sys.stdin)) and write
+  exactly one JSON object to stdout via print(json.dumps(...)) — no trailing extra output, no
+  debug prints. This strategy needs nothing from history -- it recomputes everything directly
+  from the array every round, exactly as AGENTS.md describes.
 - It must be deterministic: the same round-input JSON must always produce the same move JSON.
 - It must never crash on well-formed input described by the contract — always emit a valid
   {"action": "compare"|"swap"|"done", ...} object.
@@ -69,9 +66,6 @@ RAW="$("$LLM" -p "$PROMPT" --output-format text \
   exit 1
 }
 
-# Strip a markdown fence if the model added one anyway, despite the CONSTRAINTS above --
-# defensive, not load-bearing: real-world LLM output sometimes wraps code in ```python...```
-# even when told not to.
 CODE="$(printf '%s\n' "$RAW" | sed -e '/^```/d')"
 
 printf '%s\n' "$CODE" > "$OUT_FILE"
