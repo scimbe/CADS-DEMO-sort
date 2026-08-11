@@ -27,6 +27,7 @@ const {
   MAX_ARRAY_LEN,
   runSoloRun,
   runRelaySession,
+  runRaceSession,
 } = require("./server.lib.js");
 
 const LISTEN = process.env.SORT_BRIDGE_LISTEN || "0.0.0.0:8789";
@@ -150,6 +151,41 @@ async function handleRun(req, res, participants, participantId, query) {
   res.end();
 }
 
+/** Race mode: same seed array to N participants, each an independent solo run, ranked at the
+ *  end. Unlike relay, participants never see each other's moves -- this is a direct head-to-head
+ *  on identical starting conditions. Safe to run concurrently: runSoloRun (server.lib.js) holds
+ *  no shared/module-level mutable state, and Node's single-threaded event loop means each
+ *  participant's res.write() call fully completes before the next, so interleaved round events
+ *  from different participants never corrupt each other's JSON line. Orchestration itself lives
+ *  in runRaceSession (server.lib.js) so it's testable with stub handlers, same as relay mode. */
+async function handleRace(req, res, participants, ids, query) {
+  const chosen = [];
+  for (const id of ids) {
+    const config = participants.get(id);
+    if (!config) return jsonError(res, 404, `unknown participant "${id}"`);
+    chosen.push(config);
+  }
+  if (chosen.length < 2) return jsonError(res, 400, "at least two participant ids required (?ids=a,b,c)");
+  const len = Math.min(Math.max(Number(query.get("len")) || 8, 2), MAX_ARRAY_LEN);
+  const initialArray = randomArray(len);
+
+  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
+  sendNdjson(res, { stage: "start", mode: "race", participants: chosen.map((c) => c.you), initialArray });
+
+  try {
+    const result = await runRaceSession({
+      participants: chosen.map((c) => ({ you: c.you, callHandler: (input) => callHandlerProcess(c.cmd, input) })),
+      initialArray,
+      budget: BUDGET,
+      onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
+    });
+    sendNdjson(res, { stage: "final", mode: "race", initialArray: result.initialArray, ranked: result.ranked, results: result.results });
+  } catch (e) {
+    sendNdjson(res, { stage: "error", message: e.message || String(e) });
+  }
+  res.end();
+}
+
 async function handleRelay(req, res, participants, ids, query) {
   const chosen = [];
   for (const id of ids) {
@@ -226,6 +262,11 @@ function main() {
       handleRelay(req, res, participants, ids, url.searchParams);
       return;
     }
+    if (req.method === "POST" && url.pathname === "/race") {
+      const ids = (url.searchParams.get("ids") || "").split(",").map((s) => s.trim()).filter(Boolean);
+      handleRace(req, res, participants, ids, url.searchParams);
+      return;
+    }
     jsonError(res, 404, "not found");
   });
   const [host, port] = LISTEN.split(":");
@@ -236,4 +277,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { loadParticipants, callHandlerProcess, randomArray };
+module.exports = { loadParticipants, callHandlerProcess, randomArray, handleRace, handleRelay, handleRun };

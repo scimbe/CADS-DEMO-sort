@@ -346,6 +346,61 @@ async function runRelaySession({ getOnlineParticipants, initialArray, budget = D
   };
 }
 
+/**
+ * Race mode (CADS-DEMO-sort redesign): same seed array handed to N participants, each running
+ * an independent, unmodified solo session -- unlike relay, they never see each other's moves, and
+ * unlike relay's tick-by-tick shared array they run fully concurrently. `participants` is an
+ * array of `{you, callHandler}`, same shape runRelaySession takes. `onRound(entry)` (optional)
+ * fires for every round from every participant, already tagged with `you`, in whatever order
+ * their real calls resolve in -- a caller streaming this to a browser taps it exactly like
+ * runSoloRun's own onRound.
+ *
+ * Ranking: finished-correctly beats not-finished, then fewest roundsUsed, then fastest
+ * wallClockMs. A participant whose callHandler rejects unexpectedly (not a protocol fault -- an
+ * actual thrown/rejected error escaping runSoloRun, which shouldn't normally happen since
+ * runSoloRun already turns handler failures into per-round faults) is recorded with an `error`
+ * field and ranked last rather than aborting the whole race.
+ */
+async function runRaceSession({ participants, initialArray, budget = DEFAULT_BUDGET, onRound = () => {} }) {
+  if (!Array.isArray(participants) || participants.length < 2) {
+    throw new Error("runRaceSession needs at least two participants");
+  }
+  if (initialArray.length > MAX_ARRAY_LEN) {
+    throw new Error(`array length ${initialArray.length} exceeds MAX_ARRAY_LEN (${MAX_ARRAY_LEN})`);
+  }
+
+  const results = await Promise.all(
+    participants.map((p) =>
+      runSoloRun({
+        you: p.you,
+        initialArray,
+        budget,
+        callHandler: p.callHandler,
+        onRound: (entry) => onRound({ you: p.you, ...entry }),
+      }).catch((e) => ({ you: p.you, error: e.message || String(e), finishedCorrectly: false }))
+    )
+  );
+
+  const ranked = results
+    .map((r) => ({
+      you: r.you,
+      finishedCorrectly: !!r.finishedCorrectly,
+      roundsUsed: r.roundsUsed ?? null,
+      wallClockMs: r.wallClockMs ?? null,
+      comparisons: r.comparisons ?? null,
+      swaps: r.swaps ?? null,
+      faults: r.faults ?? null,
+      error: r.error || null,
+    }))
+    .sort((a, b) => {
+      if (a.finishedCorrectly !== b.finishedCorrectly) return a.finishedCorrectly ? -1 : 1;
+      if ((a.roundsUsed ?? Infinity) !== (b.roundsUsed ?? Infinity)) return (a.roundsUsed ?? Infinity) - (b.roundsUsed ?? Infinity);
+      return (a.wallClockMs ?? Infinity) - (b.wallClockMs ?? Infinity);
+    });
+
+  return { initialArray, ranked, results };
+}
+
 module.exports = {
   DEFAULT_BUDGET,
   DEFAULT_TIMEOUT_MS,
@@ -362,4 +417,5 @@ module.exports = {
   runSoloRun,
   runRelayTick,
   runRelaySession,
+  runRaceSession,
 };

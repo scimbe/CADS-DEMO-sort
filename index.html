@@ -122,6 +122,11 @@
  .board{display:grid;gap:.7rem}
  .score{border:1px solid var(--line);border-left-width:3px;border-radius:10px;background:var(--panel);padding:.7rem .85rem}
  .score.correct{border-color:var(--ok)}
+ .ranking{border:1px solid var(--accent);border-left-width:3px;border-radius:10px;background:var(--panel);padding:.7rem .85rem}
+ .ranking .who strong{font-size:.95rem;font-weight:600}
+ .ranking ol{margin:.5rem 0 0;padding-left:1.25rem;display:grid;gap:.3rem;font-family:var(--mono);font-size:.78rem;color:var(--muted2)}
+ .ranking li.win{color:var(--ok)}
+ .ranking li.err{color:var(--danger)}
  .score .who{display:flex;justify-content:space-between;align-items:baseline;gap:.5rem;margin-bottom:.5rem}
  .score .who strong{font-size:.95rem;font-weight:600;line-height:1.25}
  .score .who .id{font-family:var(--mono);font-size:.65rem;color:var(--muted)}
@@ -187,7 +192,7 @@
    <select id="solo-participant"><option>loading…</option></select>
   </div>
   <fieldset class="roster">
-   <legend>Relay participants (pick 2+)</legend>
+   <legend>Relay / race participants (pick 2+)</legend>
    <div class="chips" id="roster"><span class="pill"><i></i>loading…</span></div>
   </fieldset>
   <div class="ctl">
@@ -208,6 +213,7 @@
    <div style="display:flex;gap:.5rem">
     <button class="btn primary" id="run-solo" disabled>Solo run</button>
     <button class="btn" id="run-relay" disabled>Relay run</button>
+    <button class="btn" id="run-race" disabled>Race run</button>
     <button class="btn" id="stop" disabled>Stop</button>
    </div>
   </div>
@@ -283,7 +289,7 @@
  const $ = (id) => document.getElementById(id);
  const els = {
   roster: $("roster"), soloSelect: $("solo-participant"), len: $("len"), pace: $("pace"),
-  solo: $("run-solo"), relay: $("run-relay"), stop: $("stop"),
+  solo: $("run-solo"), relay: $("run-relay"), race: $("run-race"), stop: $("stop"),
   arena: $("arena"), timeline: $("timeline"), ramp: $("ramp"),
   board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
   notice: $("notice"), title: $("arena-title"), pillState: $("pill-state"), pillInv: $("pill-inv"),
@@ -380,6 +386,12 @@
   anim: null,           // { i, j, t0, dur } — the sliding swap
   timeline: [],         // { action, who }
   scores: new Map(),    // you -> score record
+  // race only: each participant runs against its OWN copy of the same starting array,
+  // concurrently — there is no single shared array to animate in the main arena canvas the way
+  // solo/relay have, so the arena stays a static reference view and per-participant progress
+  // (comparisons/swaps/faults/inversions) lives entirely in the scoreboard cards instead.
+  raceArrays: new Map(), // you -> that participant's own current array
+  raceRanked: null,      // final ranked summary (stage:"final"), rendered above the scoreboards
   finished: false, sortedNow: false,
  };
 
@@ -535,9 +547,42 @@
   ctx.fillStyle = last === 0 ? theme.ok : accent; ctx.fill();
  }
 
+ function raceLabel(you) {
+  const meta = state.roster.find((p) => p.you === you);
+  return meta ? meta.label : you;
+ }
+
+ function buildRaceRanking(ranked) {
+  const card = document.createElement("div");
+  card.className = "ranking";
+  const who = document.createElement("div");
+  who.className = "who";
+  const strong = document.createElement("strong"); strong.textContent = "Race result";
+  who.append(strong);
+  const list = document.createElement("ol");
+  ranked.forEach((r) => {
+   const li = document.createElement("li");
+   if (r.error) {
+    li.className = "err";
+    li.textContent = `${raceLabel(r.you)} — error: ${r.error}`;
+   } else if (r.finishedCorrectly) {
+    li.className = "win";
+    li.textContent = `${raceLabel(r.you)} — ${r.roundsUsed} rounds · ${(r.wallClockMs / 1000).toFixed(2)}s`;
+   } else {
+    li.textContent = `${raceLabel(r.you)} — did not finish (${r.faults} faults)`;
+   }
+   list.append(li);
+  });
+  card.append(who, list);
+  return card;
+ }
+
  function renderBoard() {
   if (!state.scores.size) return;
   els.board.innerHTML = "";
+  if (state.mode === "race" && state.raceRanked && state.raceRanked.length) {
+   els.board.append(buildRaceRanking(state.raceRanked));
+  }
   for (const s of state.scores.values()) {
    const card = document.createElement("div");
    card.className = "score" + (s.finishedCorrectly ? " correct" : "");
@@ -658,10 +703,16 @@
    state.sortedNow = isSorted(state.array);
    els.rampLo.textContent = String(state.vmin);
    els.rampHi.textContent = String(state.vmax);
-   const ids = ev.mode === "relay" ? ev.participants : [ev.you];
+   const ids = (ev.mode === "relay" || ev.mode === "race") ? ev.participants : [ev.you];
    ids.forEach((id, k) => state.colorIndex.set(id, k));
    for (const id of ids) { const s = scoreFor(id); s.status = "running"; s.inv = [inversions(state.array)]; }
-   els.title.textContent = `arena · ${state.mode} · n=${state.array.length} · [${state.initial.join(", ")}]`;
+   if (ev.mode === "race") {
+    // Every participant races an independent copy of this SAME array — track each one
+    // separately instead of trying to animate N concurrent arrays in one arena canvas.
+    state.raceArrays = new Map(ids.map((id) => [id, ev.initialArray.slice()]));
+   }
+   const staticNote = ev.mode === "race" ? " · static view — live progress in the scoreboards below" : "";
+   els.title.textContent = `arena · ${state.mode} · n=${state.array.length} · [${state.initial.join(", ")}]${staticNote}`;
    log(`start ${state.mode} · ${ids.join(", ")} · [${state.initial.join(", ")}] · ${inversions(state.array)} inversions`, "sys");
    renderBoard();
    return;
@@ -677,13 +728,17 @@
    const who = ev.you || (state.mode === "solo" ? [...state.scores.keys()][0] : null);
    const s = who ? scoreFor(who) : null;
    const n = ev.round != null ? ev.round : ev.tick;
-   const tag = who && state.mode === "relay" ? ` ${who}` : "";
+   const tag = who && state.mode !== "solo" ? ` ${who}` : "";
+   const isRace = state.mode === "race";
+   // In race mode, every participant has its own independent array — read/mutate THAT one,
+   // never the single shared state.array relay/solo use.
+   const arr = isRace && who ? state.raceArrays.get(who) : state.array;
    if (s) s.rounds = Math.max(s.rounds, n || 0);
 
    if (ev.action === "fault") {
     if (s) { s.faults++; s.status = "faulting"; }
     state.timeline.push({ action: "fault", who });
-    state.active = null;
+    if (!isRace) state.active = null;
     log(`r${String(n).padStart(3)}${tag} FAULT — ${ev.reason}`, "fault");
    } else if (ev.action === "done") {
     state.timeline.push({ action: "done", who });
@@ -697,28 +752,56 @@
    } else if (ev.action === "compare") {
     if (s) s.comparisons++;
     state.timeline.push({ action: "compare", who });
-    state.active = { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() };
-    log(`r${String(n).padStart(3)}${tag} compare ${ev.i} ${ev.j} → ${state.array[ev.i]} vs ${state.array[ev.j]}`);
+    if (!isRace) state.active = { i: ev.i, j: ev.j, action: "compare", until: performance.now() + holdMs() };
+    log(`r${String(n).padStart(3)}${tag} compare ${ev.i} ${ev.j} → ${arr[ev.i]} vs ${arr[ev.j]}`);
    } else if (ev.action === "swap") {
     if (s) s.swaps++;
     state.timeline.push({ action: "swap", who });
-    if (ev.resultArray) state.array = ev.resultArray.slice();
-    else { const t = state.array[ev.i]; state.array[ev.i] = state.array[ev.j]; state.array[ev.j] = t; }
-    if (state.mode === "relay" && who != null) {
-     const c = state.colorIndex.get(who);
-     if (c != null) { state.owner[ev.i] = c; state.owner[ev.j] = c; }
+    if (isRace) {
+     // runSoloRun's onRound never carries resultArray (only relay's per-tick events do), so
+     // this is always the live path: mutate this participant's own array copy in place.
+     if (ev.resultArray) state.raceArrays.set(who, ev.resultArray.slice());
+     else if (arr) { const t = arr[ev.i]; arr[ev.i] = arr[ev.j]; arr[ev.j] = t; }
+    } else {
+     if (ev.resultArray) state.array = ev.resultArray.slice();
+     else { const t = state.array[ev.i]; state.array[ev.i] = state.array[ev.j]; state.array[ev.j] = t; }
+     if (state.mode === "relay" && who != null) {
+      const c = state.colorIndex.get(who);
+      if (c != null) { state.owner[ev.i] = c; state.owner[ev.j] = c; }
+     }
+     state.active = { i: ev.i, j: ev.j, action: "swap", until: performance.now() + holdMs() };
+     if (!reduceMotion.matches && Number(els.pace.value) > 0) {
+      state.anim = { i: ev.i, j: ev.j, t0: performance.now(), dur: Math.min(260, 1000 / Number(els.pace.value)) };
+     }
+     state.sortedNow = isSorted(state.array);
     }
-    state.active = { i: ev.i, j: ev.j, action: "swap", until: performance.now() + holdMs() };
-    if (!reduceMotion.matches && Number(els.pace.value) > 0) {
-     state.anim = { i: ev.i, j: ev.j, t0: performance.now(), dur: Math.min(260, 1000 / Number(els.pace.value)) };
-    }
-    state.sortedNow = isSorted(state.array);
-    const inv = inversions(state.array);
+    const curArr = isRace ? state.raceArrays.get(who) : state.array;
+    const inv = inversions(curArr);
     if (state.mode === "relay") { for (const sc of state.scores.values()) sc.inv.push(inv); }
     else if (s) s.inv.push(inv);
-    els.pillInv.textContent = `inversions ${inv}`;
-    log(`r${String(n).padStart(3)}${tag} swap ${ev.i} ${ev.j} → [${state.array.join(", ")}] · ${inv} inv`, "swap");
+    if (!isRace) els.pillInv.textContent = `inversions ${inv}`;
+    log(`r${String(n).padStart(3)}${tag} swap ${ev.i} ${ev.j} → [${curArr.join(", ")}] · ${inv} inv`, "swap");
    }
+   renderBoard();
+   return;
+  }
+
+  if (ev.stage === "final" && state.mode === "race") {
+   // No single finalArray/finishedCorrectly for a race — each participant has its own, already
+   // summarized and ranked server-side (server.lib.js's runRaceSession).
+   const results = ev.results || [];
+   for (const r of results) {
+    const s = scoreFor(r.you);
+    s.comparisons = r.comparisons; s.swaps = r.swaps; s.faults = r.faults;
+    s.rounds = r.roundsUsed; s.wallClockMs = r.wallClockMs;
+    s.finishedCorrectly = !!r.finishedCorrectly;
+    s.status = r.error ? `error: ${r.error}` : (s.finishedCorrectly ? "finished correctly" : (r.faults ? "gave up · faults" : "budget exhausted"));
+   }
+   state.raceRanked = ev.ranked || [];
+   const winner = state.raceRanked.find((r) => r.finishedCorrectly);
+   setPill(els.pillState, winner ? "done" : "bad", winner ? `winner: ${raceLabel(winner.you)}` : "no finisher");
+   log(`final race · ${results.length} participants · winner: ${winner ? raceLabel(winner.you) : "none"}`, winner ? "ok" : "fault");
+   state.finished = true;
    renderBoard();
    return;
   }
@@ -755,7 +838,7 @@
  }
 
  function finishRun() {
-  els.solo.disabled = false; els.relay.disabled = false; els.stop.disabled = true;
+  els.solo.disabled = false; els.relay.disabled = false; els.race.disabled = false; els.stop.disabled = true;
   syncButtons();
   if (!state.finished) setPill(els.pillState, null, "idle");
   els.status.textContent = state.finished ? "run complete." : "stopped.";
@@ -800,12 +883,13 @@
   state.array = []; state.initial = []; state.owner = [];
   state.active = null; state.anim = null; state.timeline = [];
   state.scores = new Map(); state.colorIndex = new Map();
+  state.raceArrays = new Map(); state.raceRanked = null;
   queue.length = 0; logLines = 0;
   els.log.innerHTML = ""; els.logCount.textContent = "";
   els.board.innerHTML = "";
   els.pillInv.textContent = "inversions —";
   setPill(els.pillState, "live", "running");
-  els.solo.disabled = true; els.relay.disabled = true; els.stop.disabled = false;
+  els.solo.disabled = true; els.relay.disabled = true; els.race.disabled = true; els.stop.disabled = false;
  }
 
  async function run(mode) {
@@ -815,10 +899,14 @@
   resetRun(mode);
   els.status.textContent = mode === "solo"
    ? `running ${ids[0]} on a fresh array of ${len}…`
+   : mode === "race"
+   ? `racing ${ids.length} participants head-to-head on an identical array of ${len}…`
    : `running relay with ${ids.length} participants on a fresh array of ${len}…`;
   startPump();
   const url = mode === "solo"
    ? `/run/${encodeURIComponent(ids[0])}?len=${len}`
+   : mode === "race"
+   ? `/race?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`
    : `/relay?ids=${ids.map(encodeURIComponent).join(",")}&len=${len}`;
   try {
    await stream(url);
@@ -834,8 +922,11 @@
  function syncButtons() {
   if (state.running) return;
   els.solo.disabled = !state.soloParticipant;
-  els.relay.disabled = state.selected.size < 2;
-  els.relay.textContent = state.selected.size >= 2 ? `Relay run · ${state.selected.size}` : "Relay run";
+  const n = state.selected.size;
+  els.relay.disabled = n < 2;
+  els.relay.textContent = n >= 2 ? `Relay run · ${n}` : "Relay run";
+  els.race.disabled = n < 2;
+  els.race.textContent = n >= 2 ? `Race run · ${n}` : "Race run";
  }
 
  // Solo picker: a real <select>, not a checkbox -- structurally cannot be "0 selected" or
@@ -924,6 +1015,7 @@
  els.soloSelect.addEventListener("change", () => { state.soloParticipant = els.soloSelect.value; syncButtons(); });
  els.solo.addEventListener("click", () => run("solo"));
  els.relay.addEventListener("click", () => run("relay"));
+ els.race.addEventListener("click", () => run("race"));
  els.stop.addEventListener("click", () => {
   if (state.abort) state.abort.abort();
   state.running = false; queue.length = 0;

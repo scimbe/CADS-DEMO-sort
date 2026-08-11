@@ -12,6 +12,7 @@ const {
   runSoloRun,
   runRelayTick,
   runRelaySession,
+  runRaceSession,
   MAX_ARRAY_LEN,
 } = require("./server.lib.js");
 
@@ -423,4 +424,106 @@ test("runRelaySession: an empty online set ends the session cleanly instead of l
   });
   assert.equal(result.ticksUsed, 0);
   assert.deepEqual(result.finalArray, [3, 1, 2]);
+});
+
+// ---- race mode: same seed array, independent concurrent solo runs, ranked ----
+
+test("runRaceSession: requires at least two participants", async () => {
+  await assert.rejects(
+    () => runRaceSession({ participants: [{ you: "solo", callHandler: async () => JSON.stringify({ action: "done" }) }], initialArray: [1, 2], budget: 5 }),
+    /at least two participants/
+  );
+});
+
+test("runRaceSession: a faster participant (fewer rounds) ranks above a slower one that also finishes correctly", async () => {
+  // Real selection sort: swap the correct value directly into the next unsorted position
+  // (non-adjacent swaps are legal per docs/protocol.md), needing at most n-1 swaps total --
+  // genuinely fewer rounds than "slow"'s adjacent-pair-only strategy on the same array.
+  const fast = {
+    you: "fast",
+    callHandler: async (input) => {
+      const arr = input.array;
+      const target = [...arr].sort((a, b) => a - b);
+      let p = 0;
+      while (p < arr.length && arr[p] === target[p]) p++;
+      if (p >= arr.length) return JSON.stringify({ action: "done" });
+      const idx = arr.indexOf(target[p], p);
+      return JSON.stringify({ action: "swap", i: p, j: idx });
+    },
+  };
+  const slow = {
+    you: "slow",
+    callHandler: async (input) => {
+      const arr = input.array;
+      for (let i = 0; i < arr.length - 1; i++) {
+        if (arr[i] > arr[i + 1]) return JSON.stringify({ action: "swap", i, j: i + 1 });
+      }
+      return JSON.stringify({ action: "done" });
+    },
+  };
+  const result = await runRaceSession({ participants: [slow, fast], initialArray: [5, 3, 8, 1, 9, 2], budget: 200 });
+  assert.equal(result.ranked[0].you, "fast", "fewer roundsUsed must rank first");
+  assert.ok(result.ranked[0].finishedCorrectly);
+  assert.ok(result.ranked[1].finishedCorrectly);
+  assert.ok(result.ranked[0].roundsUsed <= result.ranked[1].roundsUsed);
+});
+
+test("runRaceSession: a participant that finishes correctly always outranks one that never finishes, regardless of rounds", async () => {
+  const winner = {
+    you: "winner",
+    callHandler: async () => JSON.stringify({ action: "done" }),
+  };
+  const chaos = { you: "chaos", callHandler: async () => "garbage forever" };
+  const result = await runRaceSession({ participants: [chaos, winner], initialArray: [1, 2], budget: 10 });
+  assert.equal(result.ranked[0].you, "winner");
+  assert.equal(result.ranked[1].you, "chaos");
+  assert.equal(result.ranked[1].finishedCorrectly, false);
+});
+
+test("runRaceSession: both participants race the SAME initial array (identical starting conditions)", async () => {
+  const seenArrays = [];
+  const makeHandler = (you) => ({
+    you,
+    callHandler: async (input) => {
+      seenArrays.push(JSON.stringify(input.array));
+      return JSON.stringify({ action: "done" });
+    },
+  });
+  await runRaceSession({ participants: [makeHandler("a"), makeHandler("b")], initialArray: [4, 2, 1], budget: 5 });
+  assert.equal(new Set(seenArrays).size, 1, "both participants must see the identical initial array");
+});
+
+test("runRaceSession: onRound fires for every participant's rounds, each tagged with the right `you`, without waiting for the whole race to finish", async () => {
+  const makeHandler = (you, delayMs) => ({
+    you,
+    callHandler: async () => {
+      if (delayMs) await new Promise((r) => setTimeout(r, delayMs));
+      return JSON.stringify({ action: "done" });
+    },
+  });
+  const seen = [];
+  await runRaceSession({
+    participants: [makeHandler("slow", 20), makeHandler("fast", 0)],
+    initialArray: [1, 2],
+    budget: 5,
+    onRound: (entry) => seen.push(entry),
+  });
+  assert.ok(seen.some((e) => e.you === "slow"));
+  assert.ok(seen.some((e) => e.you === "fast"));
+  // the fast participant's (only) round event must have been delivered before the slow one's,
+  // proving events aren't buffered until Promise.all resolves for everyone
+  const fastIdx = seen.findIndex((e) => e.you === "fast");
+  const slowIdx = seen.findIndex((e) => e.you === "slow");
+  assert.ok(fastIdx < slowIdx, "fast participant's round event should arrive before the slow one's");
+});
+
+test("runRaceSession: a callHandler that throws synchronously (real spawn failure, not a protocol fault) doesn't abort the whole race", async () => {
+  const broken = { you: "broken", callHandler: async () => { throw new Error("spawn ENOENT"); } };
+  const fine = { you: "fine", callHandler: async () => JSON.stringify({ action: "done" }) };
+  const result = await runRaceSession({ participants: [broken, fine], initialArray: [1, 2], budget: 5 });
+  assert.equal(result.ranked.find((r) => r.you === "fine").finishedCorrectly, true);
+  // runSoloRun already turns handler failures into per-round faults rather than rejecting, so
+  // "broken" still resolves a normal (if all-faults) result here, not an `error` entry -- this
+  // test's real purpose is confirming one participant's misbehavior never takes the other down.
+  assert.ok(result.ranked.find((r) => r.you === "broken"));
 });
