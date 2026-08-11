@@ -1,0 +1,86 @@
+---
+name: sort-arena-harness
+description: Turns a plain-language sorting strategy into real, verified Sort Arena competitor code. Use when onboarding a new Sort Arena participant, or when changing an existing participant's strategy or target challenge.
+---
+
+# Sort Arena harness
+
+## What this does
+
+Sort Arena is not a place where your LLM decides sorting moves live, one at a time, while it
+competes. Your LLM's job is to **write the sorting program once, as real code** — that code is
+what actually runs the contest from then on. This skill is the guided path through that: it asks
+you for the handful of things that genuinely vary per participant, then takes care of the rest of
+the harness for you — writing the strategy spec, generating the code, checking it actually works,
+and telling you what to do next.
+
+## Why it works this way
+
+Getting a model to make a good live judgment call, under a timer, round after round, is a
+different (and much less reliable) skill than getting it to write code you can check once and
+then trust every time after. When your strategy is real code, it runs in milliseconds and behaves
+identically on every call — you can test it, verify it, and compete with it, instead of hoping
+each live decision goes well.
+
+## What I need from you
+
+Tell me these up front if you already know them — otherwise I'll ask, one at a time, plain
+language is completely fine:
+
+1. **Participant id** — a short slug for you, e.g. `insertion-fan`. Becomes your directory name
+   and how the arena identifies you.
+2. **Display label** — the friendly name shown on the leaderboard.
+3. **Your strategy, in your own words** — what should your sorter do, and why do you think it
+   fits? You do not need a textbook algorithm name. "Always fix the pair nearest the front" and
+   "assume the array is nearly sorted already, so look for the one thing out of place" are both
+   completely fine answers.
+4. **A target challenge, if you have one** — Sort Arena can hand out named challenge arrays with
+   different shapes (nearly sorted, reversed, lots of duplicates, ...). If you're building for a
+   specific one, name it (see `GET /challenges` on the bridge, or ask me to list them); I'll fold
+   its shape into what your code needs to handle well. If you don't have one in mind, that's fine
+   too — say so and I'll build for a general random array instead.
+
+## What I do with it (you don't need to do this part by hand)
+
+1. Turn what you told me into a real strategy spec — `participants/<your-id>/AGENTS.md` — plain
+   language, but precise about what to do and how to tell when you're done.
+2. Run `generate.sh`, which asks the model to write that strategy as a real, self-contained Python
+   program (`generated/handler.py`) — code, not a promise to follow instructions live.
+3. Verify what came back, two ways: `handler.sh --selftest` (does it speak the contract at all)
+   and a local dry run (`dryrun.py`) that actually sorts a real array with it — run **twice** on
+   the same array, to confirm it's genuinely deterministic code and not a live guess that happened
+   to work once.
+4. If either check fails, I don't just re-roll and hope for a cleaner sample. A failure here means
+   something in `AGENTS.md` (step 1) was ambiguous or incomplete enough that the model couldn't
+   turn it into reliable code — a missing edge case, an underspecified termination rule, a cursor
+   or state assumption that isn't actually true every round. I'll point at what specifically the
+   dry run's failure suggests is missing, tighten `AGENTS.md` to cover it, and regenerate. That
+   tightened spec — not the regenerated code by itself — is the actual fix, and it's the part
+   worth understanding: this is how you make the harness produce a *reliable* service, not just a
+   service that happened to pass once.
+
+## What you should expect to see
+
+A short pass/fail report: whether `--selftest` passed, what the dry run produced (comparisons,
+swaps, rounds used, whether it actually finished correctly sorted), and — if you named a
+challenge — how it did against that challenge's array specifically. You don't need to read or
+approve the generated Python yourself; the checks above are what "it works" means here.
+
+## What you'll have learned once this is done
+
+Not "how to get a model to sort a list live" — that was never the exercise, and not "how to get a
+model to write some code" either. The actual goal is understanding **what about the harness you
+have to change to make the generated service reliable**: which ambiguity in `AGENTS.md` produced
+which wrong behavior in the generated code, and what a tightened spec (an explicit edge case, a
+stated termination rule, a worked example) fixes versus what a plain re-roll never would have. If
+verification fails once or twice before it passes, that sequence — spec, generated code, real
+failure, sharper spec, reliable code — is not a detour from the lesson. It *is* the lesson. The
+transferable skill is diagnosing harness gaps from a real failure, not writing a good prompt on
+the first try.
+
+## After this
+
+Your generated handler is what competes. Wiring it to a tunnel and registering it with
+`sort.bunsenbrenner.org` is a separate, one-time mechanical step — see the "Join as a participant"
+how-to guide for that. This skill only covers turning your strategy into verified code; it doesn't
+touch tunnel or registration setup.
