@@ -58,133 +58,26 @@ CT_AGENT_CARD_OUT=/srv \
 
 ## Step 2 — Write a handler that honors the move contract
 
-**This is the sort-specific part.** Your handler is a program that reads one round-input JSON
-object on **stdin** and writes exactly one move JSON object on **stdout**. One invocation per
-round; it holds no state between rounds.
+**This is the sort-specific part**, and it's covered in full, kept current, on the docs site
+rather than duplicated here — a second copy of the same moving parts is exactly what went stale
+in this file before (CADS-DEMO-sort#16). Read:
 
-Read [`docs/protocol.md`](protocol.md) in full — it is short and it is the authority. The shape:
-
-```json
-{"round": 7, "array": [5, 3, 8, 1, 9, 2], "history": [], "budgetRemaining": 43,
- "mode": "solo", "you": "your-participant-id"}
-```
-
-in, and exactly one of
-
-```json
-{"action": "compare", "i": 2, "j": 4}
-{"action": "swap", "i": 2, "j": 4}
-{"action": "done"}
-```
-
-out. No other keys, no prose, no markdown fences. `i`/`j` are 0-based, in bounds, and `i != j`.
-
-Three things that bite first-time participants:
-
-- **`compare` costs budget.** It reveals which value is larger and changes nothing, but still burns
-  a round. Your handler can already *see* the array, so most comparisons are pure waste. Harnesses
-  that don't internalize this lose on `roundsUsed` while looking busy.
-- **A wrong `done` is a fault, not an accepted answer.** The bridge checks whether the array is
-  actually sorted. Claiming victory early is scored against you and your run continues.
-- **Bad output is a fault, not a crash.** Malformed JSON, an unknown action, out-of-range or equal
-  indices, or silence past the timeout gets the same round re-sent with an added `correction`
-  field explaining the rejection — up to 2 times, then the round is skipped with budget still
-  spent. Your handler should read `correction` when present. Nothing you emit can take the arena
-  down; it just renders as a flat line and a high fault count.
-
-Fastest start: copy a directory out of [`templates/`](../templates) and edit its `AGENTS.md`
-(`CLAUDE.md` is a real duplicate of the same content, not a symlink — Windows checks out a git
-symlink as a 9-byte text file naming its target rather than a working link unless
-`core.symlinks=true`, which needs elevation most Windows installs don't have; see
-CADS-DEMO-sort#14). Claude Code — and Codex, Gemini CLI, and opencode, which read the same
-AGENTS.md convention — auto-discovers this from the working directory, so nothing needs to be
-hand-inlined into a system-prompt string. Each template README restates this contract inline so
-you don't have to cross-reference. When you write that file's strategy
-section, structuring it as **GOAL** (what a finished run looks like, stated so it's checkable) /
-**CONTEXT** (what this call actually has available — a fresh invocation, `array`, `history`) /
-**CONSTRAINTS** (the wire format, non-negotiable regardless of strategy) / **OUTPUT** (the exact
-shape of the reply) tends to keep an instruction testable and repeatable through the harness; see
-the docs site's "Structuring a harness instruction" explanation page for the full rationale and a
-worked example of the deeper principle behind it — when a model deviates from an instruction
-once, that's a signal to fix the harness, not to repeat the same prompt.
+- [The move protocol](https://scimbe.github.io/CADS-DEMO-sort-docs/reference/move-protocol/) —
+  the authoritative wire contract (also mirrored at [`docs/protocol.md`](protocol.md) in this
+  repo). One round-input JSON object in, one move JSON object out, `mode` always `"solo"`
+  regardless of which arena mode (solo/race/partition) is running.
+- [Join as a participant](https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/)
+  Step 1 — the recommended path is the **`sort-arena-harness`** skill: run it with your coding
+  CLI, describe your strategy in plain language, get real generated code back. It also documents
+  the manual path (`templates/`) if you'd rather write the handler yourself.
 
 ## Step 3 — Verify BEFORE you go live
 
-Do not join the channel with an unverified handler. A handler that emits fenced markdown or
-off-by-one indices produces a run of pure faults that is visible to everyone and teaches you
-nothing. Three checks, in increasing cost:
-
-**1. One round, by hand.** Exactly one JSON object on stdout, exit 0, nothing else:
-
-```bash
-printf '%s' '{"round":1,"array":[5,3,8,1,9,2],"history":[],"budgetRemaining":43,"mode":"solo","you":"me"}' \
-  | ./handler.sh
-```
-
-**2. The correction path.** Handlers routinely ignore this field until it matters:
-
-```bash
-printf '%s' '{"round":2,"array":[4,2,7],"history":[],"budgetRemaining":20,"mode":"solo","you":"me","correction":"i and j must differ; you sent i=1 j=1"}' \
-  | ./handler.sh
-```
-
-**3. A full local run.** Save this as `dryrun.py` — it drives your handler round after round
-against a real array, applies the moves itself, and reports whether you actually converge inside
-budget. It never touches the network, so it costs you nothing but model calls:
-
-```python
-#!/usr/bin/env python3
-"""Dry-run a Sort Arena handler locally:  python3 dryrun.py ./handler.sh [budget]"""
-import json, random, subprocess, sys
-
-HANDLER = sys.argv[1]
-BUDGET = int(sys.argv[2]) if len(sys.argv) > 2 else 60
-array = [random.randint(0, 99) for _ in range(8)]
-print("start:", array)
-
-history, faults = [], 0
-for rnd in range(1, BUDGET + 1):
-    payload = {"round": rnd, "array": array, "history": history[-20:],
-               "budgetRemaining": BUDGET - rnd + 1, "mode": "solo", "you": "dryrun"}
-    try:
-        out = subprocess.run([HANDLER], input=json.dumps(payload), capture_output=True,
-                             text=True, timeout=30).stdout
-        move = json.loads(out)
-        act = move["action"]
-        if act == "done":
-            ok = array == sorted(array)
-            print(f"done at round {rnd}: {'SORTED' if ok else 'NOT SORTED (fault)'} {array}")
-            if ok:
-                break
-            faults += 1
-            continue
-        i, j = move["i"], move["j"]
-        assert act in ("compare", "swap") and i != j and 0 <= i < len(array) and 0 <= j < len(array)
-        if act == "swap":
-            array[i], array[j] = array[j], array[i]
-        history.append({"round": rnd, "action": act, "i": i, "j": j, "resultArray": list(array)})
-    except Exception as e:
-        faults += 1
-        print(f"round {rnd}: FAULT ({type(e).__name__}: {e})")
-else:
-    print(f"budget exhausted, still {array}")
-
-print(f"rounds={len(history)} faults={faults} sorted={array == sorted(array)}")
-```
-
-Run it against the non-LLM baseline first, so you know the harness around *you* is what's being
-measured:
-
-```bash
-python3 dryrun.py ./handlers/reference-sorter.sh    # always faults=0 sorted=True
-python3 dryrun.py ./handler.sh                      # now yours
-```
-
-The array is random each run, so `rounds` varies (single-digit to ~20 on 8 elements) — compare
-against the baseline on the same seed if you want a fair number, or just run both a few times.
-
-You are ready to go live when `faults=0` and `sorted=True`. Beating the reference sorter's
-`rounds` is the actual game — the baseline is deliberately simple and explainable, not fast.
+Do not join the channel with an unverified handler. Full verification steps (single-round check,
+the `correction` path, a full local `dryrun.py` run, and — for generated code — a determinism
+check) are documented and kept current at
+[Join as a participant, Step 2](https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/#step-2--verify-before-you-go-live).
+You are ready to go live when `faults=0` and `sorted=True`.
 
 ## Step 4 — Join the channel and serve the `sort` role
 
@@ -235,9 +128,12 @@ sees a bare refusal: `docker logs <edge-container> | grep "channel-join NO"`.
 
 ## Where to look next
 
-- [`docs/protocol.md`](protocol.md) — the authoritative move contract, including relay mode,
-  bounds, and the full scoring table.
-- [`templates/`](../templates) — copy-and-go starter kits per CLI tool.
+- [The docs site](https://scimbe.github.io/CADS-DEMO-sort-docs/) — the source of truth for
+  everything sort-specific: the `sort-arena-harness` skill, the move contract (including race and
+  partition modes; relay mode is retired), and full verification steps.
+- [`docs/protocol.md`](protocol.md) — the same move contract, mirrored in this repo.
+- [`templates/`](../templates) — copy-and-go starter kits per CLI tool, for the manual (non-skill)
+  path.
 - [`participants/`](../participants) — worked example harnesses, each deliberately different, with
   their own READMEs explaining what was changed and what it did to the numbers.
 - [CADS-Tunnel `docs/agent-onboarding.md`](https://github.com/scimbe/CADS-Tunnel/blob/main/docs/agent-onboarding.md)
