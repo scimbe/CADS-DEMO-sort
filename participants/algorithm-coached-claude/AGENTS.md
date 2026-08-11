@@ -1,15 +1,13 @@
----
-name: "Sort Arena — Efficient Selection Strategy"
-description: "Coaches an efficient, low-swap strategy for the CADS-DEMO-sort move protocol: maintain a sorted prefix, place each position exactly once, and never spend a round on information the input already gives you. Use when driving a participant handler in the sort arena."
----
+# algorithm-coached-claude — efficient selection strategy
 
-# Sort Arena — Efficient Selection Strategy
+The shared `participants/CLAUDE.md` above already gives you the full move-protocol contract.
+This file adds a coached strategy on top of it: selection sort by direct placement.
 
-## What This Skill Does
+## What this strategy does
 
 Turns "sort this array, one primitive move per call" from an improvised guessing game into a
-disciplined, stateless algorithm. Every round you are handed the REAL current array; this skill
-tells you how to derive the single best move from it without needing memory of previous rounds.
+disciplined, stateless algorithm. Every round you are handed the REAL current array; derive the
+single best move from it without needing memory of previous rounds.
 
 ## The three facts the strategy rests on
 
@@ -38,10 +36,10 @@ Because `i != j` is required by the protocol, step 1's definition of `p` already
 
 ## Why this is measurably cheaper
 
-An array of length `n` needs at most `n - 1` swaps under direct placement, and usually fewer
-(any element already in its final spot is skipped for free). Adjacent-swap strategies instead
-need one swap per inversion — for a shuffled array of length `n` that is on the order of
-`n²/4`. Combined with spending zero rounds on `compare`, the round count collapses.
+An array of length `n` needs at most `n - 1` swaps under direct placement, and usually fewer (any
+element already in its final spot is skipped for free). Adjacent-swap strategies instead need one
+swap per inversion — for a shuffled array of length `n` that is on the order of `n²/4`. Combined
+with spending zero rounds on `compare`, the round count collapses.
 
 ## Discipline rules
 
@@ -49,8 +47,6 @@ need one swap per inversion — for a shuffled array of length `n` that is on th
   previous round; the process is invoked fresh each round and history is only a log.
 - Never emit `done` unless you have checked every adjacent pair `array[k] <= array[k+1]`. A wrong
   `done` costs a round and is recorded against you.
-- One JSON object, no prose, no markdown fences. The protocol is strict and a violation is a
-  fault regardless of how good the intended move was.
 
 ## Worked example
 

@@ -92,8 +92,18 @@ Three things that bite first-time participants:
   spent. Your handler should read `correction` when present. Nothing you emit can take the arena
   down; it just renders as a flat line and a high fault count.
 
-Fastest start: copy a directory out of [`templates/`](../templates) and edit its system prompt.
-Each template README restates this contract inline so you don't have to cross-reference.
+Fastest start: copy a directory out of [`templates/`](../templates) and edit its `AGENTS.md`
+(`CLAUDE.md` is a symlink to the same file). Claude Code — and Codex, Gemini CLI, and opencode,
+which read the same AGENTS.md convention — auto-discovers this from the working directory, so
+nothing needs to be hand-inlined into a system-prompt string. Each template README restates this
+contract inline so you don't have to cross-reference. When you write that file's strategy
+section, structuring it as **GOAL** (what a finished run looks like, stated so it's checkable) /
+**CONTEXT** (what this call actually has available — a fresh invocation, `array`, `history`) /
+**CONSTRAINTS** (the wire format, non-negotiable regardless of strategy) / **OUTPUT** (the exact
+shape of the reply) tends to keep an instruction testable and repeatable through the harness; see
+the docs site's "Structuring a harness instruction" explanation page for the full rationale and a
+worked example of the deeper principle behind it — when a model deviates from an instruction
+once, that's a signal to fix the harness, not to repeat the same prompt.
 
 ## Step 3 — Verify BEFORE you go live
 

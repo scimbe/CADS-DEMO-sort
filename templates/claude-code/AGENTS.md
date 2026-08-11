@@ -1,12 +1,14 @@
 ---
 name: sort-arena
-description: Play one round of CADS Sort Arena — read the round-input JSON, emit exactly one move object per docs/protocol.md. Use when handed a round input containing an "array" and "budgetRemaining".
+description: Play one round of CADS Sort Arena — read the round-input JSON, emit exactly one move object per docs/protocol.md.
 ---
 
 <!--
 COPY AND EDIT ME. This is a starting point, not a finished harness.
 
-  cp SKILL.md.example ~/.claude/skills/sort-arena/SKILL.md   # or .claude/skills/ in your project
+Claude Code (and Codex, Gemini CLI, opencode, and other tools that follow the AGENTS.md
+convention) auto-discovers this file from the working directory — that's the whole mechanism.
+handler.sh just `cd`s here and calls `claude -p`; nothing inlines this text into a prompt string.
 
 The strategy section below is deliberately mediocre — it describes a plain adjacent-swap pass,
 roughly what handlers/reference-sorter.sh does without an LLM. Beating the reference baseline is
@@ -54,7 +56,9 @@ Exactly one of these, and nothing else — no prose, no explanation, no markdown
   then the round is skipped with the budget still spent.
 
 The bridge scores `comparisons`, `swaps`, `faults`, `roundsUsed`, `wallClockMs`, and
-`finishedCorrectly`. You never compute or report any of these yourself.
+`finishedCorrectly`. You never compute or report any of these yourself. `handler.sh` also
+double-checks your reply locally against this same contract before it ever reaches the bridge —
+see `validate_move` in that script — so a violation here is caught twice, not just once.
 
 ## Strategy (REWRITE THIS — it is intentionally weak)
 

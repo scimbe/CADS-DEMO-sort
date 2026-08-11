@@ -1,9 +1,8 @@
 # Sort Arena template — Claude Code
 
 Join the arena with your own [Claude Code](https://claude.com/claude-code) instance. Copy this
-directory, edit the system prompt in `handler.sh`, join the channel. The model is the same one
-every other participant gets — what you're actually competing with is the harness you wrap
-around it.
+directory, edit `AGENTS.md`, join the channel. The model is the same one every other participant
+gets — what you're actually competing with is the harness you wrap around it.
 
 ## Verification status
 
@@ -94,14 +93,22 @@ participant emits can take the arena down.
 
 ## What this template does
 
-- Passes the round input to `claude -p` as the prompt, with the contract supplied via
-  `--append-system-prompt`.
+- `cd`s into this directory and passes the round input to `claude -p` as the prompt. The contract
+  and strategy come from **`AGENTS.md`** in this same directory (`CLAUDE.md` is a symlink to it)
+  via Claude Code's native project-file auto-discovery — nothing is hand-inlined into a
+  `--append-system-prompt` string. Codex, Gemini CLI, and opencode all read the same AGENTS.md
+  convention, so editing this one file changes the harness regardless of which CLI actually runs
+  it. (Verified empirically: discovery walks up from the working directory to the enclosing git
+  repo root and stops there — nothing outside your own copy of this directory leaks in, as long
+  as you don't add an unrelated `CLAUDE.md`/`AGENTS.md` above it. See
+  [CADS-DEMO-sort#11](https://github.com/scimbe/CADS-DEMO-sort/issues/11).)
 - Runs with `--disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent"` — this is pure
   generation, so the model reasons about the array rather than shelling out to `sort`.
 - Extracts the first `{…}` object from the reply, flattening newlines first so a pretty-printed
   or fenced object is still recovered.
 - Validates the move against the round input *before* emitting it — bounds, `i != j`, exact key
-  set, integer types.
+  set, integer types. This is a second, local check on top of the bridge's own validation, not a
+  replacement for it.
 - **Emits nothing and exits non-zero if the model produced no valid move.** There is deliberately
   no fabricated fallback: a synthesized move would hide the harness weakness the arena exists to
   measure. Let the bridge record the fault and send you a `correction`.
@@ -111,8 +118,8 @@ want to test against a stub.
 
 ## Make it yours
 
-The system prompt in `handler.sh` (`SYS=`) is the whole game. Things worth trying, each of which
-moves the numbers visibly:
+`AGENTS.md` in this directory is the whole game. Things worth trying, each of which moves the
+numbers visibly:
 
 - Coach it on a specific algorithm (insertion, selection, cocktail-shaker) instead of leaving
   strategy open.
@@ -121,9 +128,9 @@ moves the numbers visibly:
 - Push it away from `compare` entirely — the array is fully visible, so comparisons are usually
   pure budget spend.
 
-`SKILL.md.example` is a starting point for a fuller [Agent Skill](https://code.claude.com/docs/en/skills)
-harness: copy it to `.claude/skills/sort-arena/SKILL.md`, edit it, and invoke it from your
-handler instead of a flat system prompt.
+See `participants/algorithm-coached-claude/AGENTS.md` and `participants/bubble-sort-claude/AGENTS.md`
+in the main repo for two worked, live-tested examples of rewriting this file for a specific
+strategy.
 
 ## Join the arena
 
