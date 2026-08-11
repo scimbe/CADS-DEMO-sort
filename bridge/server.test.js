@@ -233,6 +233,35 @@ test("runSoloRun: a perfectly-behaved insertion-sort-shaped handler finishes cor
   assert.equal(result.inversionsOverTime[result.inversionsOverTime.length - 1], 0);
 });
 
+test("runSoloRun: onRound fires once per round, in order, as each round resolves — not all at once at the end (CADS-DEMO-sort#12)", async () => {
+  const callHandler = async (input) => {
+    const arr = input.array;
+    for (let i = 0; i < arr.length - 1; i++) {
+      if (arr[i] > arr[i + 1]) return JSON.stringify({ action: "swap", i, j: i + 1 });
+    }
+    return JSON.stringify({ action: "done" });
+  };
+  const seenBeforeFinish = [];
+  const result = await runSoloRun({
+    callHandler,
+    initialArray: [3, 2, 1],
+    you: "streamed",
+    budget: 200,
+    onRound: (entry) => seenBeforeFinish.push({ ...entry }),
+  });
+  // The whole point of onRound: every trace entry was ALSO delivered incrementally, in the same
+  // order, not just assembled into result.trace after the loop already finished.
+  assert.deepEqual(seenBeforeFinish, result.trace);
+  assert.ok(seenBeforeFinish.length > 0);
+  assert.equal(seenBeforeFinish[0].round, 1);
+});
+
+test("runSoloRun: onRound is optional — omitting it behaves exactly as before (no crash, same result shape)", async () => {
+  const callHandler = async () => JSON.stringify({ action: "done" });
+  const result = await runSoloRun({ callHandler, initialArray: [1, 2], you: "no-listener", budget: 5 });
+  assert.equal(result.finishedCorrectly, true);
+});
+
 test("runSoloRun: a maximally chaotic handler (always garbage) never crashes the run — it just burns its whole budget as faults", async () => {
   const callHandler = async () => "give me an F";
   const budget = 15;

@@ -156,7 +156,7 @@ async function runRound({ callHandler, round, array, history, budgetRemaining, m
  * Run a full solo participant to completion (or until budget/array-length bounds stop it).
  * `callHandler` is the only side-effecting dependency, injected so tests never spawn a process.
  */
-async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUDGET }) {
+async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUDGET, onRound = () => {} }) {
   if (initialArray.length > MAX_ARRAY_LEN) {
     throw new Error(`array length ${initialArray.length} exceeds MAX_ARRAY_LEN (${MAX_ARRAY_LEN})`);
   }
@@ -170,6 +170,14 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
   let round = 0;
   const startedAt = Date.now();
   const inversionsOverTime = [countInversions(array)];
+
+  // `onRound` fires synchronously right after each round resolves — CADS-DEMO-sort#12: a caller
+  // that wants live per-round progress (server.js streaming NDJSON to the browser) taps this
+  // instead of waiting for the full `trace` array a run below only assembles at the very end.
+  const record = (entry) => {
+    trace.push(entry);
+    onRound(entry);
+  };
 
   while (round < budget) {
     round++;
@@ -187,11 +195,11 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
 
     if (outcome.fault) {
       faults++;
-      trace.push({ round, action: "fault", reason: outcome.reason, callMs });
+      record({ round, action: "fault", reason: outcome.reason, callMs });
       continue; // array unchanged, budget still spent — per docs/protocol.md
     }
     if (outcome.done) {
-      trace.push({ round, action: "done", callMs, actuallySorted: outcome.actuallySorted });
+      record({ round, action: "done", callMs, actuallySorted: outcome.actuallySorted });
       if (outcome.actuallySorted) {
         finishedCorrectly = true;
         break;
@@ -208,7 +216,7 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
       inversionsOverTime.push(countInversions(array));
     }
     history.push({ round, action: move.action, i: move.i, j: move.j, resultArray: array.slice() });
-    trace.push({ round, action: move.action, i: move.i, j: move.j, callMs });
+    record({ round, action: move.action, i: move.i, j: move.j, callMs });
   }
 
   return {

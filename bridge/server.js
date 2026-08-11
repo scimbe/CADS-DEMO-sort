@@ -121,26 +121,17 @@ async function handleRun(req, res, participants, participantId, query) {
   sendNdjson(res, { stage: "start", you: config.you, label: config.label, initialArray });
 
   try {
-    // runSoloRun doesn't itself emit per-round progress events; we wrap callHandler to stream
-    // each round's outcome as it happens by tapping the trace incrementally instead — simplest
-    // correct approach: re-run with a callHandler that also streams, since runSoloRun's trace
-    // is only available at the end otherwise. We stream from a thin per-round callback here.
-    let lastArray = initialArray;
-    let roundNum = 0;
+    // CADS-DEMO-sort#12: runSoloRun's `onRound` fires synchronously right after each round
+    // resolves, so a real LLM-backed participant's progress reaches the browser round by round
+    // instead of arriving as one buffered burst once the entire (possibly multi-minute) run
+    // finishes.
     const result = await runSoloRun({
       you: config.you,
       initialArray,
       budget: BUDGET,
-      callHandler: async (input) => {
-        roundNum = input.round;
-        const out = await callHandlerProcess(config.cmd, input);
-        return out;
-      },
+      callHandler: (input) => callHandlerProcess(config.cmd, input),
+      onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
-    // Replay the trace as NDJSON now that we have it, so the client always gets a consistent
-    // ordered stream even though callHandler above didn't stream per-round (kept simple and
-    // correct over clever-but-fragile interleaving of a shared mutable "lastArray").
-    for (const entry of result.trace) sendNdjson(res, { stage: "round", ...entry });
     sendNdjson(res, {
       stage: "final",
       you: result.you,
