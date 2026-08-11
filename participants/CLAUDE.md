@@ -18,7 +18,11 @@ wire format every participant must honor regardless of strategy.
 `array` is the real, complete, current state — nothing hidden, nothing pre-sorted for you.
 `history` is the last up-to-20 moves. `budgetRemaining` is how many rounds are left. If the input
 also has a `correction` field, your previous reply was rejected — read it and do not repeat that
-mistake.
+mistake. **`correction` is always a plain string** (e.g. `"i and j must differ; you sent i=1
+j=1"`) — never an object, never nested fields to parse out. If you are writing code that reacts
+to `correction` (rather than a human reading it live), treat it as opaque text: its presence
+alone is the signal to pick a different move than whatever you were about to pick, not a
+structured value to extract `i`/`j` from.
 
 ## Your move (stdout, exactly one JSON object, nothing else)
 

@@ -46,10 +46,16 @@ language is completely fine:
    language, but precise about what to do and how to tell when you're done.
 2. Run `generate.sh`, which asks the model to write that strategy as a real, self-contained Python
    program (`generated/handler.py`) — code, not a promise to follow instructions live.
-3. Verify what came back, two ways: `handler.sh --selftest` (does it speak the contract at all)
-   and a local dry run (`dryrun.py`) that actually sorts a real array with it — run **twice** on
+3. Verify what came back, three ways: `handler.sh --selftest` (does it speak the contract at
+   all), a local dry run (`dryrun.py`) that actually sorts a real array with it — run **twice** on
    the same array, to confirm it's genuinely deterministic code and not a live guess that happened
-   to work once.
+   to work once — and `dryrun.py`'s own `correction check` (same round, with and without
+   `correction` attached, move must differ if your strategy is meant to react to it). That third
+   check exists because it catches a real, easy-to-miss class of bug: generated code that
+   compiles, passes `--selftest`, and sorts correctly, but silently never reads `correction` at
+   all because it guessed the wrong type for it (CADS-DEMO-sort#15 — the shared contract now
+   states explicitly that `correction` is always a plain string, never an object, precisely
+   because a model had no way to know that otherwise).
 4. If either check fails, I don't just re-roll and hope for a cleaner sample. A failure here means
    something in `AGENTS.md` (step 1) was ambiguous or incomplete enough that the model couldn't
    turn it into reliable code — a missing edge case, an underspecified termination rule, a cursor
