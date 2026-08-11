@@ -141,7 +141,7 @@ client can translate a participant's own local `i`/`j` into the whole array's gl
 full-length arrays, partition's segments never overlap and can legitimately be drawn into one
 shared picture at fixed offsets.
 
-The final summary reports `wholeArraySorted` and, honestly, it is usually `false` even when every
+The final summary reports `wholeArraySorted`, and it is usually `false` even when every
 segment finished perfectly: splitting by position is not the same as splitting by value range, and
 concatenating locally-sorted slices only yields a globally sorted array when each slice already
 happened to hold the right value range (real parallel/external sorts need a merge phase afterward,
