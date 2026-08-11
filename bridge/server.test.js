@@ -10,8 +10,6 @@ const {
   parseHandlerOutput,
   runRound,
   runSoloRun,
-  runRelayTick,
-  runRelaySession,
   runRaceSession,
   splitEven,
   runPartitionSession,
@@ -304,128 +302,6 @@ test("runSoloRun: history sent to the handler is capped, even after many moves",
   };
   await runSoloRun({ callHandler, initialArray: [1, 2], you: "swapper", budget: 50 });
   assert.ok(maxHistorySeen <= 20, `history must be capped at 20, saw ${maxHistorySeen}`);
-});
-
-// ---- relay mode (CADS-DEMO-sort#3): shared array, round-robin, per-participant attribution ----
-
-test("runRelayTick: two participants each get exactly one move, array reflects both in order", async () => {
-  const alice = {
-    you: "alice",
-    callHandler: async (input) => JSON.stringify({ action: "swap", i: 0, j: 1 }),
-  };
-  const bob = {
-    you: "bob",
-    callHandler: async (input) => JSON.stringify({ action: "swap", i: 1, j: 2 }),
-  };
-  const scores = new Map();
-  const result = await runRelayTick({
-    participants: [alice, bob],
-    array: [3, 1, 2],
-    history: [],
-    budgetRemaining: 10,
-    tickNumber: 1,
-    scores,
-  });
-  // alice swaps(0,1): [3,1,2] -> [1,3,2]; then bob swaps(1,2) on that result: [1,3,2] -> [1,2,3]
-  assert.deepEqual(result.array, [1, 2, 3]);
-  assert.equal(result.events.length, 2);
-  assert.equal(result.events[0].you, "alice");
-  assert.equal(result.events[1].you, "bob");
-  assert.equal(scores.get("alice").swaps, 1);
-  assert.equal(scores.get("bob").swaps, 1);
-});
-
-test("runRelayTick: a fault from one participant doesn't block the next participant's turn", async () => {
-  const chaos = { you: "chaos", callHandler: async () => "nonsense" };
-  const steady = { you: "steady", callHandler: async () => JSON.stringify({ action: "swap", i: 0, j: 1 }) };
-  const scores = new Map();
-  const result = await runRelayTick({
-    participants: [chaos, steady],
-    array: [2, 1],
-    history: [],
-    budgetRemaining: 10,
-    tickNumber: 1,
-    scores,
-  });
-  assert.equal(scores.get("chaos").faults, 1);
-  assert.equal(scores.get("steady").swaps, 1);
-  assert.deepEqual(result.array, [1, 2]);
-});
-
-test("runRelayTick: history passed to the SECOND participant already includes the first's move (relay, not parallel)", async () => {
-  let bobSawHistoryLength = null;
-  const alice = { you: "alice", callHandler: async () => JSON.stringify({ action: "swap", i: 0, j: 1 }) };
-  const bob = {
-    you: "bob",
-    callHandler: async (input) => {
-      bobSawHistoryLength = input.history.length;
-      assert.equal(input.mode, "relay");
-      assert.equal(input.you, "bob");
-      return JSON.stringify({ action: "done" });
-    },
-  };
-  await runRelayTick({
-    participants: [alice, bob],
-    array: [2, 1],
-    history: [],
-    budgetRemaining: 10,
-    tickNumber: 1,
-    scores: new Map(),
-  });
-  assert.equal(bobSawHistoryLength, 1, "bob must see alice's move from the same tick");
-});
-
-test("runRelaySession: converges to sorted with two complementary participants and attributes scores per-agent", async () => {
-  // Each participant only ever looks at adjacent pairs starting from its own fixed offset —
-  // together they cover the whole array, like two workers splitting a bubble-sort pass.
-  const makeAdjacentFixer = (you, startAt) => ({
-    you,
-    callHandler: async (input) => {
-      const arr = input.array;
-      for (let i = startAt; i < arr.length - 1; i += 2) {
-        if (arr[i] > arr[i + 1]) return JSON.stringify({ action: "swap", i, j: i + 1 });
-      }
-      return JSON.stringify({ action: "done" });
-    },
-  });
-  const evens = makeAdjacentFixer("evens", 0);
-  const odds = makeAdjacentFixer("odds", 1);
-  const result = await runRelaySession({
-    getOnlineParticipants: () => [evens, odds],
-    initialArray: [5, 3, 8, 1, 9, 2, 7, 4],
-    budget: 100,
-  });
-  assert.equal(result.finishedCorrectly, true);
-  assert.deepEqual(result.finalArray, [1, 2, 3, 4, 5, 7, 8, 9]);
-  assert.ok(result.perParticipant.evens, "evens must have an accumulated score");
-  assert.ok(result.perParticipant.odds, "odds must have an accumulated score");
-});
-
-test("runRelaySession: an online set that changes between ticks (leave mid-run) doesn't crash the session", async () => {
-  let tickCount = 0;
-  const leaver = { you: "leaver", callHandler: async () => JSON.stringify({ action: "swap", i: 0, j: 1 }) };
-  const stayer = { you: "stayer", callHandler: async () => JSON.stringify({ action: "done" }) };
-  const result = await runRelaySession({
-    getOnlineParticipants: () => {
-      tickCount++;
-      // leaver is online for tick 1 only, then leaves; stayer is online throughout
-      return tickCount === 1 ? [leaver, stayer] : [stayer];
-    },
-    initialArray: [2, 1],
-    budget: 20,
-  });
-  assert.equal(result.finishedCorrectly, true);
-  assert.ok(result.perParticipant.leaver, "leaver's tick-1 contribution must still be scored");
-});
-
-test("runRelaySession: an empty online set ends the session cleanly instead of looping forever", async () => {
-  const result = await runRelaySession({
-    getOnlineParticipants: () => [],
-    initialArray: [3, 1, 2],
-    budget: 50,
-  });
-  assert.equal(result.ticksUsed, 0);
-  assert.deepEqual(result.finalArray, [3, 1, 2]);
 });
 
 // ---- race mode: same seed array, independent concurrent solo runs, ranked ----

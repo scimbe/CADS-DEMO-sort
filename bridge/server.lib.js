@@ -234,119 +234,6 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
 }
 
 /**
- * Run a relay/cooperative round: one shared array, every currently-online participant gets
- * exactly one move in rotation. `participants` is an array of `{you, callHandler}`; the online
- * set may change between calls (a participant can appear/disappear) — this function only ever
- * looks at the array passed to it on that call, so a caller drives the "who's online now" policy
- * from outside and this stays pure/testable (CADS-DEMO-sort#3).
- *
- * Per-participant scoring accumulates across calls via the `scores` map the caller owns and
- * passes back in — this function mutates it in place (adds comparisons/swaps/faults for whoever
- * moved this tick) and also returns it, so both call styles (ignore the return, or treat it as
- * pure and reassign) work.
- */
-async function runRelayTick({ participants, array, history, budgetRemaining, tickNumber, scores }) {
-  let currentArray = array.slice();
-  const tickHistory = history.slice();
-  const events = [];
-
-  for (const participant of participants) {
-    if (!scores.has(participant.you)) {
-      scores.set(participant.you, { comparisons: 0, swaps: 0, faults: 0, movesTaken: 0 });
-    }
-    const s = scores.get(participant.you);
-    const outcome = await runRound({
-      callHandler: participant.callHandler,
-      round: tickNumber,
-      array: currentArray,
-      history: tickHistory,
-      budgetRemaining,
-      mode: "relay",
-      you: participant.you,
-    });
-
-    if (outcome.fault) {
-      s.faults++;
-      events.push({ tick: tickNumber, you: participant.you, action: "fault", reason: outcome.reason });
-      continue;
-    }
-    if (outcome.done) {
-      events.push({ tick: tickNumber, you: participant.you, action: "done", actuallySorted: outcome.actuallySorted });
-      continue;
-    }
-    const { move } = outcome;
-    s.movesTaken++;
-    if (move.action === "compare") s.comparisons++;
-    if (move.action === "swap") {
-      s.swaps++;
-      currentArray = outcome.array;
-    }
-    const historyEntry = { round: tickNumber, you: participant.you, action: move.action, i: move.i, j: move.j, resultArray: currentArray.slice() };
-    tickHistory.push(historyEntry);
-    events.push({ tick: tickNumber, you: participant.you, ...historyEntry });
-  }
-
-  return {
-    array: currentArray,
-    history: tickHistory.slice(-HISTORY_CAP),
-    events,
-    scores,
-    inversions: countInversions(currentArray),
-    sorted: isSorted(currentArray),
-  };
-}
-
-/**
- * Run a full relay session to completion (sorted, or budget exhausted). `getOnlineParticipants()`
- * is called once per tick so the caller can change who's online between ticks without this
- * function needing to know why (join/leave is entirely the caller's concern).
- */
-async function runRelaySession({ getOnlineParticipants, initialArray, budget = DEFAULT_BUDGET }) {
-  if (initialArray.length > MAX_ARRAY_LEN) {
-    throw new Error(`array length ${initialArray.length} exceeds MAX_ARRAY_LEN (${MAX_ARRAY_LEN})`);
-  }
-  let array = initialArray.slice();
-  let history = [];
-  const scores = new Map();
-  const allEvents = [];
-  let tick = 0;
-  const startedAt = Date.now();
-  const inversionsOverTime = [countInversions(array)];
-
-  while (tick < budget) {
-    const online = getOnlineParticipants();
-    if (!online || online.length === 0) break; // nobody left to move — session ends, not a fault
-    tick++;
-    const result = await runRelayTick({
-      participants: online,
-      array,
-      history,
-      budgetRemaining: budget - tick,
-      tickNumber: tick,
-      scores,
-    });
-    array = result.array;
-    history = result.history;
-    allEvents.push(...result.events);
-    inversionsOverTime.push(result.inversions);
-    if (result.sorted) break;
-  }
-
-  const perParticipant = {};
-  for (const [you, s] of scores.entries()) perParticipant[you] = s;
-
-  return {
-    finalArray: array,
-    finishedCorrectly: isSorted(array),
-    ticksUsed: tick,
-    wallClockMs: Date.now() - startedAt,
-    inversionsOverTime,
-    perParticipant,
-    events: allEvents,
-  };
-}
-
-/**
  * Split `array` into `n` contiguous, near-equal segments, left segments absorbing the remainder
  * (length 100 split 3 ways -> 34, 33, 33, matching the natural way you'd hand out 100 items to 3
  * workers by hand). Pure and tiny on purpose — this is the one piece of partition mode's logic
@@ -443,9 +330,8 @@ async function runPartitionSession({ participants, initialArray, budget = DEFAUL
 
 /**
  * Race mode (CADS-DEMO-sort redesign): same seed array handed to N participants, each running
- * an independent, unmodified solo session -- unlike relay, they never see each other's moves, and
- * unlike relay's tick-by-tick shared array they run fully concurrently. `participants` is an
- * array of `{you, callHandler}`, same shape runRelaySession takes. `onRound(entry)` (optional)
+ * an independent, unmodified solo session, fully concurrently -- none of them ever see each
+ * other's moves. `participants` is an array of `{you, callHandler}`. `onRound(entry)` (optional)
  * fires for every round from every participant, already tagged with `you`, in whatever order
  * their real calls resolve in -- a caller streaming this to a browser taps it exactly like
  * runSoloRun's own onRound.
@@ -510,8 +396,6 @@ module.exports = {
   parseHandlerOutput,
   runRound,
   runSoloRun,
-  runRelayTick,
-  runRelaySession,
   runRaceSession,
   splitEven,
   runPartitionSession,

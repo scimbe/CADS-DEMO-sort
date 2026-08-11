@@ -28,13 +28,16 @@ not just in a benchmark table.
 }
 ```
 
-- `array` — the REAL current state. Nothing hidden, nothing pre-sorted for you.
+- `array` — the REAL current state. Nothing hidden, nothing pre-sorted for you. In race/partition
+  mode this is your own copy/segment — never another participant's.
 - `history` — the last up-to-20 moves (not the full trace, to keep the payload bounded — see
-  "Bounds" below). In `relay` mode this includes moves made by *other* participants.
+  "Bounds" below). Always your own moves only — no mode ever mixes another participant's moves in.
 - `budgetRemaining` — how many more rounds this run allows before it's cut off (see "Bounds").
-- `mode` — `"solo"` (you own the whole array end to end) or `"relay"` (you get one move per
-  tick, in rotation with every other currently-online participant, on a shared array).
-- `you` — your own participant id, so in `relay` mode you can tell your moves apart in `history`.
+- `mode` — always `"solo"` today. Race and partition are both, from a single handler's own point
+  of view, an ordinary solo run against a full array or a segment of one respectively — the
+  distinction between arena modes lives entirely in how the bridge orchestrates and streams
+  multiple participants, never in what one participant's own round input looks like.
+- `you` — your own participant id.
 
 ## Your move (stdout, exactly one JSON object, nothing else)
 
@@ -76,8 +79,10 @@ harness can fail to stay inside the contract just as easily as it can fail to so
 
 ## Bounds (why the arena can't be griefed)
 
-- `budgetRemaining` starts at a fixed per-run cap (default 200 rounds) — no participant can
-  stall forever.
+- `budgetRemaining` starts at a per-run cap — 200 rounds by default, overridable per request via
+  `?budget=N` (clamped to 10–2000) for strategies whose worst case needs more room, e.g. bubble
+  sort's O(n²) behavior on an unlucky seed. No participant can stall forever regardless of the
+  chosen budget, since 2000 is the hard ceiling.
 - Each round's LLM call is wrapped in a timeout (default 30s); a hang is a fault, not a hang.
 - `history` sent per round is capped at 20 entries — the payload doesn't grow unbounded over a
   long run.
@@ -102,26 +107,47 @@ Computed by the bridge from the move trace, never self-reported by the participa
 `inversionsOverTime` is what actually drives the on-screen animation and the little "signature"
 sparkline per participant — no participant ever computes or reports it themselves.
 
-## Relay mode (the cooperative variant)
+## Retired: relay mode
 
-Same array, same move contract, but instead of one participant owning a full run, every
-currently-online participant gets exactly one move per tick, in rotation. `history` shows the
-whole team's moves so far, including who made them. The point isn't just "who sorts best solo" —
-it's watching a chaotic harness's move get quietly cleaned up by a methodical one two ticks
-later, or two mismatched strategies repeatedly undo each other. Same scoring table, computed
-per participant across the shared trace.
+Earlier versions of this arena had a cooperative "relay" mode (one shared array, participants
+taking turns). It's gone — retired 2026-08-11 in favor of race and partition modes below, which
+answer the same "how do different harnesses compare" question more directly. `POST /relay` no
+longer exists; a request to it now 404s like any other unknown route.
 
 ## Race mode (the direct head-to-head variant)
 
-Same move contract again, but instead of sharing one array, every chosen participant runs an
-independent `solo` session against its **own copy of the same starting array**, concurrently.
-There is no shared state between them — `history` in a race is exactly the same per-participant
-shape `solo` mode already sends, never mixed with another participant's moves. What's new is only
-the pairing: `POST /race?ids=a,b,c&len=N` starts all of them on an identical array and streams
-every participant's round events on one connection, each tagged with `you`, plus a final ranked
-summary (finished-correctly first, then fewest `roundsUsed`, then fastest `wallClockMs`). It
-answers a narrower, more direct question than relay does: given the exact same array, whose
-harness actually gets there first.
+Same move contract, but instead of one participant owning a full run, every chosen participant
+runs an independent `solo` session against its **own copy of the same starting array**,
+concurrently. There is no shared state between them — `history` in a race is exactly the same
+per-participant shape `solo` mode already sends, never mixed with another participant's moves.
+What's new is only the pairing: `POST /race?ids=a,b,c&len=N` starts all of them on an identical
+array and streams every participant's round events on one connection, each tagged with `you`,
+plus a final ranked summary (finished-correctly first, then fewest `roundsUsed`, then fastest
+`wallClockMs`). It answers a direct question: given the exact same array, whose harness actually
+gets there first.
+
+## Partition mode (the parallel-segments variant)
+
+Same move contract again, but the array itself is split by **position** into one contiguous
+segment per participant — length 100 split 3 ways gives 34/33/33, left segments absorbing the
+remainder. Each participant sorts only its own segment: from its own point of view this is
+indistinguishable from a normal `solo` run against a smaller array (same `history` shape, same
+scoring fields), it just never sees the rest of the whole array.
+
+`POST /partition?ids=a,b,c&len=N` starts the split and streams every participant's round events on
+one connection. Each event carries `segmentStart`/`segmentLength` alongside the usual fields, so a
+client can translate a participant's own local `i`/`j` into the whole array's global coordinates
+(`globalIndex = localIndex + segmentStart`) — useful because, unlike race's genuinely independent
+full-length arrays, partition's segments never overlap and can legitimately be drawn into one
+shared picture at fixed offsets.
+
+The final summary reports `wholeArraySorted` and, honestly, it is usually `false` even when every
+segment finished perfectly: splitting by position is not the same as splitting by value range, and
+concatenating locally-sorted slices only yields a globally sorted array when each slice already
+happened to hold the right value range (real parallel/external sorts need a merge phase afterward,
+which this deliberately does not implement — the point here is watching segments sort
+concurrently, not shipping a working parallel sort). `perParticipant` reports each segment's own
+`finishedCorrectly`/`roundsUsed`/`comparisons`/`swaps`/`faults`, same fields the other modes use.
 
 ## How a handler decides its moves — the contract says nothing about this, on purpose
 

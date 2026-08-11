@@ -17,7 +17,7 @@
  *   SORT_ROUND_TIMEOUT_MS    - per-round handler timeout (default 30000, per docs/protocol.md)
  *   SORT_BUDGET              - default round/tick budget (default 200, per docs/protocol.md)
  *
- * Every run/race/partition/relay endpoint also accepts a per-request `?budget=N` query param
+ * Every run/race/partition endpoint also accepts a per-request `?budget=N` query param
  * (clamped to [10, 2000]), overriding SORT_BUDGET for that one call -- bubble sort's O(n^2)
  * worst case can exceed the 200-round default at the max array length on an unlucky seed.
  */
@@ -30,7 +30,6 @@ const {
   DEFAULT_TIMEOUT_MS,
   MAX_ARRAY_LEN,
   runSoloRun,
-  runRelaySession,
   runRaceSession,
   runPartitionSession,
 } = require("./server.lib.js");
@@ -255,46 +254,6 @@ async function handlePartition(req, res, participants, ids, query) {
   res.end();
 }
 
-async function handleRelay(req, res, participants, ids, query) {
-  const chosen = [];
-  for (const id of ids) {
-    const config = participants.get(id);
-    if (!config) return jsonError(res, 404, `unknown participant "${id}"`);
-    chosen.push(config);
-  }
-  if (chosen.length === 0) return jsonError(res, 400, "at least one participant id required (?ids=a,b,c)");
-  const len = Math.min(Math.max(Number(query.get("len")) || 8, 2), MAX_ARRAY_LEN);
-  const initialArray = randomArray(len);
-
-  res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
-  sendNdjson(res, { stage: "start", mode: "relay", participants: chosen.map((c) => c.you), initialArray });
-
-  try {
-    const result = await runRelaySession({
-      initialArray,
-      budget: resolveBudget(query),
-      getOnlineParticipants: () =>
-        chosen.map((c) => ({
-          you: c.you,
-          callHandler: (input) => callHandlerProcess(c.cmd, input),
-        })),
-    });
-    for (const ev of result.events) sendNdjson(res, { stage: "tick", ...ev });
-    sendNdjson(res, {
-      stage: "final",
-      finalArray: result.finalArray,
-      finishedCorrectly: result.finishedCorrectly,
-      ticksUsed: result.ticksUsed,
-      wallClockMs: result.wallClockMs,
-      inversionsOverTime: result.inversionsOverTime,
-      perParticipant: result.perParticipant,
-    });
-  } catch (e) {
-    sendNdjson(res, { stage: "error", message: e.message || String(e) });
-  }
-  res.end();
-}
-
 function main() {
   const participants = loadParticipants();
   const server = http.createServer((req, res) => {
@@ -326,11 +285,6 @@ function main() {
       handleRun(req, res, participants, decodeURIComponent(runMatch[1]), url.searchParams);
       return;
     }
-    if (req.method === "POST" && url.pathname === "/relay") {
-      const ids = (url.searchParams.get("ids") || "").split(",").map((s) => s.trim()).filter(Boolean);
-      handleRelay(req, res, participants, ids, url.searchParams);
-      return;
-    }
     if (req.method === "POST" && url.pathname === "/race") {
       const ids = (url.searchParams.get("ids") || "").split(",").map((s) => s.trim()).filter(Boolean);
       handleRace(req, res, participants, ids, url.searchParams);
@@ -351,4 +305,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { loadParticipants, callHandlerProcess, randomArray, handleRace, handlePartition, handleRelay, handleRun };
+module.exports = { loadParticipants, callHandlerProcess, randomArray, handleRace, handlePartition, handleRun };
