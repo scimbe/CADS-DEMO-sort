@@ -32,7 +32,7 @@ extract_move_json() {
 
 if [ "${1:-}" = "--selftest" ]; then
   [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
-  [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
+  [ -s "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is missing or empty at $HERE" >&2; exit 1; }
   got="$(printf 'Checked: array is [1,2,3]. Every adjacent pair is in order.\n{"action": "done"}\n' | extract_move_json)"
   printf '%s' "$got" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"done"}, m' \
     || { echo "SELFTEST FAIL: extraction did not recover a done move after a verification preamble" >&2; exit 1; }

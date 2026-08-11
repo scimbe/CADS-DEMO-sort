@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  no-symlinks:
+    # CADS-DEMO-sort#14: a git symlink (mode 120000) checks out on Windows as a 9-byte text file
+    # naming its target instead of a working link, unless core.symlinks=true -- which needs
+    # elevation most Windows installs don't have. Every CLAUDE.md in this repo used to be a
+    # symlink to AGENTS.md; they're real duplicated files now specifically to avoid this. This
+    # check is the one-line regression guard the same issue asked for, so a future symlink
+    # (accidental or otherwise) fails CI before it ships silently broken to Windows again.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fail if any file in the repo is a git symlink
+        run: |
+          symlinks="$(git ls-files -s | awk '$1 == "120000" { print $4 }')"
+          if [ -n "$symlinks" ]; then
+            echo "The following files are git symlinks (mode 120000), which check out broken on Windows without core.symlinks=true:" >&2
+            echo "$symlinks" >&2
+            exit 1
+          fi
+
+  bridge-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test bridge/server.test.js

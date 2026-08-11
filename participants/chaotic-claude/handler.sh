@@ -32,7 +32,7 @@ extract_move_json() {
 
 if [ "${1:-}" = "--selftest" ]; then
   [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
-  [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
+  [ -s "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is missing or empty at $HERE" >&2; exit 1; }
   got="$(printf 'Let me try something different!\n{"action":"compare","i":5,"j":1}\n' | extract_move_json)"
   printf '%s' "$got" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m=={"action":"compare","i":5,"j":1}, m' \
     || { echo "SELFTEST FAIL: extraction did not recover the move from a chatty reply" >&2; exit 1; }

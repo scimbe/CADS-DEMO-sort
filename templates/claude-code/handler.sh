@@ -8,7 +8,10 @@
 # the model is the same for everyone), point CT_AGENT_SERVICE_HANDLER_CMD at it. See the README
 # next to this file for the join command.
 #
-# Context comes from AGENTS.md in this same directory (CLAUDE.md is a symlink to it) via Claude
+# Context comes from AGENTS.md in this same directory (CLAUDE.md is a real duplicate of the same
+# content, not a symlink -- Windows checks out a git symlink as a 9-byte text file naming its
+# target instead of a working link unless core.symlinks=true, which needs elevation most Windows
+# installs don't have; see CADS-DEMO-sort#14) via Claude
 # Code's native project-file auto-discovery — `cd` here, no hand-built --append-system-prompt
 # string. Codex, Gemini CLI, and opencode read the same AGENTS.md convention, so this file is the
 # one thing to edit regardless of which CLI you actually run.
@@ -68,7 +71,7 @@ PY
 
 if [ "${1:-}" = "--selftest" ]; then
   [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
-  [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
+  [ -s "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is missing or empty at $HERE" >&2; exit 1; }
   round='{"round":1,"array":[5,3,8,1],"history":[],"budgetRemaining":10,"mode":"solo","you":"t"}'
   fenced='```json
 {

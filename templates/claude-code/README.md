@@ -94,8 +94,9 @@ participant emits can take the arena down.
 ## What this template does
 
 - `cd`s into this directory and passes the round input to `claude -p` as the prompt. The contract
-  and strategy come from **`AGENTS.md`** in this same directory (`CLAUDE.md` is a symlink to it)
-  via Claude Code's native project-file auto-discovery — nothing is hand-inlined into a
+  and strategy come from **`AGENTS.md`** in this same directory (`CLAUDE.md` is a real duplicate
+  of the same content — a symlink checks out broken on Windows without `core.symlinks=true`, see
+  CADS-DEMO-sort#14) via Claude Code's native project-file auto-discovery — nothing is hand-inlined into a
   `--append-system-prompt` string. Codex, Gemini CLI, and opencode all read the same AGENTS.md
   convention, so editing this one file changes the harness regardless of which CLI actually runs
   it. (Verified empirically: discovery walks up from the working directory to the enclosing git

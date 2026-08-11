@@ -93,10 +93,13 @@ Three things that bite first-time participants:
   down; it just renders as a flat line and a high fault count.
 
 Fastest start: copy a directory out of [`templates/`](../templates) and edit its `AGENTS.md`
-(`CLAUDE.md` is a symlink to the same file). Claude Code — and Codex, Gemini CLI, and opencode,
-which read the same AGENTS.md convention — auto-discovers this from the working directory, so
-nothing needs to be hand-inlined into a system-prompt string. Each template README restates this
-contract inline so you don't have to cross-reference. When you write that file's strategy
+(`CLAUDE.md` is a real duplicate of the same content, not a symlink — Windows checks out a git
+symlink as a 9-byte text file naming its target rather than a working link unless
+`core.symlinks=true`, which needs elevation most Windows installs don't have; see
+CADS-DEMO-sort#14). Claude Code — and Codex, Gemini CLI, and opencode, which read the same
+AGENTS.md convention — auto-discovers this from the working directory, so nothing needs to be
+hand-inlined into a system-prompt string. Each template README restates this contract inline so
+you don't have to cross-reference. When you write that file's strategy
 section, structuring it as **GOAL** (what a finished run looks like, stated so it's checkable) /
 **CONTEXT** (what this call actually has available — a fresh invocation, `array`, `history`) /
 **CONSTRAINTS** (the wire format, non-negotiable regardless of strategy) / **OUTPUT** (the exact

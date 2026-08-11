@@ -39,7 +39,7 @@ extract_move_json() {
 
 if [ "${1:-}" = "--selftest" ]; then
   [ -f "$HERE/AGENTS.md" ] || { echo "SELFTEST FAIL: AGENTS.md missing at $HERE" >&2; exit 1; }
-  [ -L "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is not the expected AGENTS.md symlink at $HERE" >&2; exit 1; }
+  [ -s "$HERE/CLAUDE.md" ] || { echo "SELFTEST FAIL: CLAUDE.md is missing or empty at $HERE" >&2; exit 1; }
   sample='Sure, here is my move:
 ```json
 {
