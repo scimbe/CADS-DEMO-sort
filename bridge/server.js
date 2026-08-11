@@ -38,10 +38,12 @@ const {
 const LISTEN = process.env.SORT_BRIDGE_LISTEN || "0.0.0.0:8789";
 const TIMEOUT_MS = Number(process.env.SORT_ROUND_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
 const BUDGET = Number(process.env.SORT_BUDGET || DEFAULT_BUDGET);
-// Bubble sort's worst case is O(n^2) rounds -- at MAX_ARRAY_LEN (24) that's up to 276, which can
-// exceed the default 200-round BUDGET on an unlucky (highly-shuffled) seed array, cutting a
-// perfectly correct run off before it finishes. Let the caller ask for more, bounded so nobody
-// can request an unbounded number of real handler subprocess spawns.
+// This coached bubble sort visits a full-length pass every time with no shrink optimization, so
+// its real worst case is (n-1)^2 rounds, not just "O(n^2) inversions" -- at MAX_ARRAY_LEN (24)
+// that's up to ~530, confirmed live (a real 24-element run still hadn't finished at budget=400).
+// Comfortably exceeds the default 200-round BUDGET on an unlucky (highly-shuffled) seed array,
+// cutting a perfectly correct run off before it finishes. Let the caller ask for more, bounded so
+// nobody can request an unbounded number of real handler subprocess spawns.
 const MAX_BUDGET = 2000;
 function resolveBudget(query) {
   return Math.min(Math.max(Number(query.get("budget")) || BUDGET, 10), MAX_BUDGET);

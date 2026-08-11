@@ -205,8 +205,8 @@
    <input type="number" id="len" min="2" max="24" step="1" value="12">
   </div>
   <div class="ctl">
-   <label for="budget" title="Max rounds before a run is cut off, unfinished. Bubble sort's worst case is O(n²) rounds -- at 24 elements that can exceed the 200 default.">Round budget</label>
-   <input type="number" id="budget" min="10" max="2000" step="10" value="200">
+   <label for="budget" title="Max rounds before a run is cut off, unfinished. This coached bubble sort visits a full-length pass every time with no shrink optimization, so its real worst case is (n-1)² rounds -- at 24 elements that's up to ~530, well past the 200 default.">Round budget</label>
+   <input type="number" id="budget" min="10" max="2000" step="10" value="600">
   </div>
   <div class="ctl">
    <label for="pace">Playback</label>
