@@ -363,7 +363,7 @@
 
  // ----------------------------------------------------------------- state ----
  const state = {
-  roster: [], selected: new Set(), colorIndex: new Map(),
+  roster: [], selected: new Set(), colorIndex: new Map(), rosterLoaded: false,
   mode: null, running: false, abort: null,
   array: [], initial: [], vmin: 1, vmax: 99,
   owner: [],            // relay only: index into the attribution palette per slot
@@ -865,7 +865,16 @@
    const res = await fetch(api("/participants"));
    if (!res.ok) throw new Error(`HTTP ${res.status}`);
    state.roster = await res.json();
-   if (state.roster.length) state.selected.add(state.roster[0].you);
+   const liveIds = new Set(state.roster.map((p) => p.you));
+   // CADS-DEMO-sort#13: only seed a default selection on the very first successful load, and
+   // only drop a selected id here if we're not mid-run — otherwise a background re-poll (below)
+   // silently re-adds an unchecked participant (default-selecting roster[0] unconditionally on
+   // every call) or yanks the selection out from under an active run.
+   if (!state.rosterLoaded && state.roster.length) state.selected.add(state.roster[0].you);
+   if (!state.running) {
+    for (const id of [...state.selected]) if (!liveIds.has(id)) state.selected.delete(id);
+   }
+   state.rosterLoaded = true;
    renderRoster();
    els.status.textContent = `${state.roster.length} participant(s) configured on the bridge.`;
   } catch (e) {
@@ -894,6 +903,10 @@
  paintRamp();
  drawArena();
  loadRoster();
+ // CADS-DEMO-sort#13: keep the roster current while the page just sits open — a participant
+ // that joins or drops off the bridge shows up without a manual reload. Safe to call while a
+ // run is in progress: loadRoster() itself skips pruning state.selected mid-run.
+ setInterval(loadRoster, 15_000);
 })();
 </script>
 </body>
