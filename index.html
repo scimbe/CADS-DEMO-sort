@@ -68,6 +68,25 @@
 
  main{padding:2rem 0 3rem}
 
+ /* ---- mode tabs: each mode only ever shows the controls/view relevant to it -- a single
+    participant picker for solo, a shared arena for solo/partition, and (since partition's
+    segments live in ONE array but race's don't -- there is no single shared array to show)
+    one panel per participant for race instead of a big arena nobody's actually watching. ---- */
+ .tabs{display:flex;gap:.3rem;margin-bottom:1.1rem;border-bottom:1px solid var(--line)}
+ .tab{font:inherit;font-family:var(--mono);font-size:.78rem;letter-spacing:.03em;text-transform:uppercase;
+  border:0;background:none;color:var(--muted);padding:.6rem 1rem;cursor:pointer;border-bottom:2px solid transparent;
+  margin-bottom:-1px}
+ .tab:hover{color:var(--ink)}
+ .tab[aria-selected="true"]{color:var(--accent);border-bottom-color:var(--accent)}
+ .tab:disabled{opacity:.45;cursor:default}
+ .tab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+ /* [data-tab-panel] elements double as .ctl/.btn/.roster, which set their own `display` further
+    down this stylesheet -- matching those base classes here too (not just the bare attribute)
+    keeps this at equal-or-higher specificity so source order can't flip which one wins. */
+ [data-tab-panel],.ctl[data-tab-panel],.btn[data-tab-panel],fieldset[data-tab-panel]{display:none}
+ [data-tab-panel].tab-active,.ctl[data-tab-panel].tab-active,.btn[data-tab-panel].tab-active{display:flex}
+ fieldset[data-tab-panel].tab-active{display:block}
+
  /* ---- controls ---- */
  .controls{display:flex;flex-wrap:wrap;gap:.9rem 1.4rem;align-items:flex-end;margin-bottom:1rem}
  .ctl{display:flex;flex-direction:column;gap:.35rem}
@@ -98,6 +117,13 @@
  /* ---- the arena ---- */
  .workbench{display:grid;grid-template-columns:minmax(0,1fr);gap:1.1rem}
  @media (min-width:1000px){.workbench{grid-template-columns:minmax(0,1fr) 20.5rem;align-items:start}}
+ /* Race: each participant races its own independent copy of the array, so there is no single
+    shared array a big arena canvas could usefully show (see resetRun/renderBoard's own comments)
+    -- the per-participant scorecards, each with their own mini-arena, become the PRIMARY view
+    instead of a narrow sidebar next to an arena that would otherwise just sit static. */
+ .workbench.mode-race #arena-card{display:none}
+ .workbench.mode-race .board{grid-column:1/-1;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr))}
+ .workbench.mode-race canvas.mini-arena{height:92px}
  .card{border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden}
  .card-head{display:flex;justify-content:space-between;align-items:center;gap:.6rem;flex-wrap:wrap;
   padding:.65rem .9rem;border-bottom:1px solid var(--line);font-family:var(--mono);font-size:.7rem;color:var(--muted)}
@@ -198,13 +224,19 @@
 <main class="shell">
  <div id="notice" hidden class="notice"></div>
 
+ <div class="tabs" role="tablist" aria-label="Arena mode">
+  <button class="tab" role="tab" id="tab-solo" data-tab="solo" aria-selected="true">Solo run</button>
+  <button class="tab" role="tab" id="tab-partition" data-tab="partition" aria-selected="false">Partition run</button>
+  <button class="tab" role="tab" id="tab-race" data-tab="race" aria-selected="false">Race run</button>
+ </div>
+
  <div class="controls">
-  <div class="ctl">
+  <div class="ctl" data-tab-panel="solo">
    <label for="solo-participant">Solo participant</label>
    <select id="solo-participant"><option>loading…</option></select>
   </div>
-  <fieldset class="roster">
-   <legend>Partition / race participants (pick 2+)</legend>
+  <fieldset class="roster" data-tab-panel="partition,race">
+   <legend>Pick 2+ participants</legend>
    <div class="chips" id="roster"><span class="pill"><i></i>loading…</span></div>
   </fieldset>
   <div class="ctl">
@@ -227,17 +259,17 @@
   <div class="ctl">
    <label>&nbsp;</label>
    <div style="display:flex;gap:.5rem">
-    <button class="btn primary" id="run-solo" disabled>Solo run</button>
-    <button class="btn" id="run-partition" disabled>Partition run</button>
-    <button class="btn" id="run-race" disabled>Race run</button>
+    <button class="btn primary" id="run-solo" disabled data-tab-panel="solo">Solo run</button>
+    <button class="btn primary" id="run-partition" disabled data-tab-panel="partition">Partition run</button>
+    <button class="btn primary" id="run-race" disabled data-tab-panel="race">Race run</button>
     <button class="btn" id="stop" disabled>Stop</button>
    </div>
   </div>
  </div>
 
- <div class="workbench">
+ <div class="workbench" id="workbench">
   <div>
-   <div class="card">
+   <div class="card" id="arena-card">
     <div class="card-head">
      <span id="arena-title">arena · idle</span>
      <span style="display:flex;gap:.4rem;flex-wrap:wrap">
@@ -267,7 +299,7 @@
   </div>
 
   <div class="board" id="board">
-   <div class="empty">No run yet. Pick a participant and start a solo run — <code>handlers/reference-sorter.sh</code> is
+   <div class="empty">No run yet. Pick participant(s) and start a run — <code>handlers/reference-sorter.sh</code> is
     the always-online, non-LLM baseline every other participant is measured against.</div>
   </div>
  </div>
@@ -303,7 +335,30 @@
   board: $("board"), log: $("log"), logCount: $("log-count"), status: $("status"),
   notice: $("notice"), title: $("arena-title"), pillState: $("pill-state"), pillInv: $("pill-inv"),
   rampLo: $("ramp-lo"), rampHi: $("ramp-hi"), attribLegend: $("attrib-legend"),
+  workbench: $("workbench"), tabs: [$("tab-solo"), $("tab-partition"), $("tab-race")],
+  tabPanels: document.querySelectorAll("[data-tab-panel]"),
  };
+
+ // ------------------------------------------------------------------ tabs ----
+ // Each mode is its own tab so the controls and the workbench layout only ever show what that
+ // mode actually uses: solo's single-select dropdown vs. partition/race's multi-select chips,
+ // and (see the .workbench.mode-race CSS) a big shared arena for solo/partition vs. one panel
+ // per participant for race, which has no single shared array to show one of.
+ let uiTab = "solo";
+ function setTab(tab) {
+  // Switching tabs mid-run would desync the visible layout from state.mode (which drives
+  // renderBoard's own per-mode branches) -- tabs are disabled instead while a run is live (see
+  // resetRun), so this is a defensive no-op, not the primary guard.
+  if (state.running) return;
+  uiTab = tab;
+  for (const btn of els.tabs) btn.setAttribute("aria-selected", String(btn.dataset.tab === tab));
+  for (const el of els.tabPanels) {
+   const tabs = el.dataset.tabPanel.split(",");
+   el.classList.toggle("tab-active", tabs.includes(tab));
+  }
+  els.workbench.classList.toggle("mode-race", tab === "race");
+ }
+ for (const btn of els.tabs) btn.addEventListener("click", () => setTab(btn.dataset.tab));
 
  // ---------------------------------------------------------------- colour ----
  /** OKLCH -> sRGB. Used so the value ramp is monotonic in *perceived* lightness
@@ -1111,6 +1166,13 @@
 
  function resetRun(mode) {
   state.mode = mode; state.running = true; state.finished = false;
+  // Lock the tab bar to whatever mode is actually running -- switching views mid-run would
+  // desync the visible layout (arena-vs-per-participant-panels) from renderBoard's own
+  // state.mode branches. Setting the workbench class directly here (not via setTab, which
+  // itself is a no-op once state.running is true) covers the auto-restart-on-error path too,
+  // where resetRun runs again before the previous run's `finally` has cleared state.running.
+  for (const btn of els.tabs) btn.disabled = true;
+  els.workbench.classList.toggle("mode-race", mode === "race");
   state.array = []; state.initial = []; state.owner = [];
   state.active = null; state.anim = null; state.timeline = [];
   state.scores = new Map(); state.colorIndex = new Map();
@@ -1149,6 +1211,7 @@
    if (e.name !== "AbortError") { log("ERROR: " + e.message, "err"); els.status.textContent = e.message; setPill(els.pillState, "bad", "failed"); }
   } finally {
    state.running = false;
+   for (const btn of els.tabs) btn.disabled = false;
    startPump(); // make sure the drain-and-finish path runs even on an early failure
   }
  }
@@ -1260,6 +1323,7 @@
  });
  window.addEventListener("resize", () => { paintRamp(); drawArena(); drawTimeline(); renderBoard(); });
 
+ setTab("solo");
  paintRamp();
  drawArena();
  loadRoster();
