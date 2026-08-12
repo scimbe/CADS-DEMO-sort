@@ -400,6 +400,12 @@ test(
           assert.match(cmd, /CT_CHANNEL_ROLE=initiate/);
           assert.match(cmd, /CT_CHANNEL_CALL_SERVICE=text_generation/);
           assert.match(cmd, new RegExp(`CT_CHANNEL_HOLDER_KEY=${bridge.holder.priv.toString("hex")}`));
+          // Real production regression (CADS-DEMO-sort#9, windows-selection): without this flag
+          // the bridge's own ct-agent invocation faults every round with "CT_CHANNEL_LISTEN
+          // required" -- the bridge only ever dials OUT to a participant, so it has no dialable
+          // address of its own and needs none, same as join.js's accept-side command already
+          // correctly sets for the participant's half of this same pairing.
+          assert.match(cmd, /CT_CHANNEL_RELAY_ONLY=1/);
 
           // The participant's own grant is waiting for their one-shot status poll.
           assert.ok(pendingGrantDelivery.has("real-participant"));

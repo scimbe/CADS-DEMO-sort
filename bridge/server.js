@@ -729,8 +729,16 @@ async function automateApproval(pending) {
     process.env.SORT_CHANNEL_FRONT_DOOR && process.env.SORT_CHANNEL_FRONT_DOOR_CERT
       ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${process.env.SORT_CHANNEL_FRONT_DOOR_CERT} `
       : "";
+  // CT_CHANNEL_RELAY_ONLY=1: the bridge only ever DIALS OUT to a participant (initiate role) --
+  // it's never dialed back, so it has no dialable address of its own and needs none. Without
+  // this, ChannelJoinCliConfig::from_lookup requires CT_CHANNEL_LISTEN (a real support case:
+  // confirmed live, every round faulted with "CT_CHANNEL_LISTEN required (advertised host:port)
+  // -- or set CT_CHANNEL_RELAY_ONLY=1 for a relay-only member with no dialable address" the
+  // moment CADS-DEMO-sort#9's ct-agent-binary-missing gap above was fixed and this cmd actually
+  // ran for the first time). Same flag join.js's own accept-side command already correctly sets
+  // for the participant's half of this same pairing.
   const cmd =
-    `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=text_generation ` +
+    `CT_CHANNEL_ROLE=initiate CT_CHANNEL_RELAY_ONLY=1 CT_CHANNEL_CALL_SERVICE=text_generation ` +
     `CT_CHANNEL_GRANT=${minted.grantA} ` +
     `CT_CHANNEL_HOLDER_KEY=${bridgeHolderPriv.toString("hex")} CT_CHANNEL_NOISE_KEY=${bridgeNoisePriv.toString("hex")} ` +
     `CT_CHANNEL_BROKER=${process.env.SORT_CHANNEL_BROKER} CT_CHANNEL_RELAY=${process.env.SORT_CHANNEL_RELAY} ` +
