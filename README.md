@@ -49,6 +49,7 @@ participants/          example LLM harnesses (the "Beispiel-Mitspieler")
 templates/             starter kits per CLI tool (Claude Code, Codex, Gemini CLI, opencode)
 docs/protocol.md        the move contract every participant must honor
 docs/onboarding.md      how to join, llms.txt-style (mirrors CADS-Tunnel's agent-onboarding.md)
+docs/operations.md      operator-only: running the deployment, rotating SORT_OIDC_TOKEN
 run-demo.sh             up | down | status — same shape as the sibling demos
 compose.sort-demo.yml
 ```
