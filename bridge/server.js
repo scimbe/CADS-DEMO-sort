@@ -518,16 +518,104 @@ function readSecret(name) {
   return process.env[name];
 }
 
+// In-memory-only OIDC session, started by an admin submitting a real browser-obtained token pair
+// via POST /api/admin/oidc-session (see handleOidcSessionSubmit) -- the operator types their
+// password into a real HTML form in THEIR OWN browser; only the resulting access+refresh tokens
+// ever reach this process, never the password. Once started, the bridge self-refreshes the
+// access token on a timer using ONLY the refresh token (a normal, intended use of a refresh
+// token -- this is not a workaround of anything, it's what refresh tokens are for) until the
+// refresh token's own lifetime runs out, then goes back to failing closed. Deliberately not
+// persisted to disk: a bridge restart just means the operator starts a fresh session, same as
+// any other web session expiring.
+let liveOidcSession = null; // {accessToken, accessExpiresAt, refreshToken, sessionDeadline}
+let oidcRefreshTimer = null;
+
+function currentOidcToken() {
+  if (liveOidcSession && liveOidcSession.accessExpiresAt > Date.now()) return liveOidcSession.accessToken;
+  return readSecret("SORT_OIDC_TOKEN");
+}
+
 function automationConfigured() {
   return Boolean(
     readSecret("SORT_CHANNEL_OPERATOR_KEY") &&
       readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY") &&
       readSecret("SORT_CHANNEL_BRIDGE_NOISE_KEY") &&
       process.env.SORT_CP_URL &&
-      readSecret("SORT_OIDC_TOKEN") &&
+      currentOidcToken() &&
       process.env.SORT_CHANNEL_BROKER &&
       process.env.SORT_CHANNEL_RELAY
   );
+}
+
+const OIDC_CLIENT_ID = process.env.SORT_OIDC_CLIENT_ID || "admin-cli";
+
+async function refreshOidcToken(issuerBase, refreshToken) {
+  const resp = await fetch(`${issuerBase.replace(/\/$/, "")}/protocol/openid-connect/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "refresh_token", client_id: OIDC_CLIENT_ID, refresh_token: refreshToken }),
+  });
+  if (!resp.ok) throw new Error(`refresh_token grant failed: HTTP ${resp.status}`);
+  return resp.json();
+}
+
+/** POST /api/admin/oidc-session -- admin-only. Body: {accessToken, refreshToken, expiresIn,
+ *  refreshExpiresIn} -- exactly the four fields a real browser-side password-grant response
+ *  carries (see admin.html's login form). Starts (or replaces) the self-refreshing session
+ *  described above. */
+async function handleOidcSessionSubmit(req, res) {
+  if (!requireAdmin(req, res)) return;
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return jsonError(res, 400, e.message || "invalid request body");
+  }
+  const { accessToken, refreshToken, expiresIn, refreshExpiresIn } = body || {};
+  if (
+    typeof accessToken !== "string" ||
+    !accessToken ||
+    typeof refreshToken !== "string" ||
+    !refreshToken ||
+    !Number.isFinite(expiresIn) ||
+    !Number.isFinite(refreshExpiresIn)
+  ) {
+    return jsonError(res, 400, "accessToken, refreshToken (non-empty strings), expiresIn, refreshExpiresIn (numbers) required");
+  }
+  const issuerBase = process.env.SORT_OIDC_ISSUER_BASE;
+  if (!issuerBase) return jsonError(res, 503, "SORT_OIDC_ISSUER_BASE not configured on this deployment");
+
+  if (oidcRefreshTimer) clearTimeout(oidcRefreshTimer);
+  const sessionDeadline = Date.now() + refreshExpiresIn * 1000;
+  liveOidcSession = { accessToken, accessExpiresAt: Date.now() + expiresIn * 1000, refreshToken, sessionDeadline };
+
+  const scheduleNext = (delayMs) => {
+    oidcRefreshTimer = setTimeout(async () => {
+      if (!liveOidcSession || Date.now() >= liveOidcSession.sessionDeadline) {
+        liveOidcSession = null;
+        oidcRefreshTimer = null;
+        return;
+      }
+      try {
+        const fresh = await refreshOidcToken(issuerBase, liveOidcSession.refreshToken);
+        liveOidcSession = {
+          accessToken: fresh.access_token,
+          accessExpiresAt: Date.now() + fresh.expires_in * 1000,
+          refreshToken: fresh.refresh_token || liveOidcSession.refreshToken,
+          sessionDeadline: liveOidcSession.sessionDeadline,
+        };
+        scheduleNext(Math.max(5_000, (fresh.expires_in - 30) * 1000));
+      } catch (e) {
+        process.stderr.write(`bridge: oidc auto-refresh failed, session ended early: ${e.message || e}\n`);
+        liveOidcSession = null; // fail closed -- automationConfigured()/cpFetch go back to the
+        oidcRefreshTimer = null; // static SORT_OIDC_TOKEN (or unconfigured) honestly, no fake success
+      }
+    }, delayMs);
+  };
+  scheduleNext(Math.max(5_000, (expiresIn - 30) * 1000));
+
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true, activeUntil: new Date(sessionDeadline).toISOString() }));
 }
 
 // sort-channel-grant's own MAX_TTL_SECS (grant/src/main.rs) is 30 days -- passing anything
@@ -581,7 +669,7 @@ function mintGrants(holderAHex, holderBHex) {
  *  service-account credential is wired in, that's a real operational limitation of Phase 2 worth
  *  documenting, not hiding. */
 async function cpFetch(path, body) {
-  const token = readSecret("SORT_OIDC_TOKEN");
+  const token = currentOidcToken();
   const resp = await fetch(`${process.env.SORT_CP_URL}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
@@ -663,6 +751,11 @@ function handleChannelInfo(req, res) {
       bridgeHolderPubkey: process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY || null,
       channelBroker: process.env.SORT_CHANNEL_BROKER || null,
       channelRelay: process.env.SORT_CHANNEL_RELAY || null,
+      // Not secret -- a realm base URL, same as CADS-Tunnel's own public agent-onboarding docs
+      // already publish. admin.html's login form uses this to know where to POST the password
+      // grant (see docs/operations.md); the password itself never reaches this bridge.
+      oidcIssuerBase: process.env.SORT_OIDC_ISSUER_BASE || null,
+      oidcClientId: OIDC_CLIENT_ID,
     })
   );
 }
@@ -882,6 +975,22 @@ function main() {
       handleChannelInfo(req, res);
       return;
     }
+    if (req.method === "POST" && url.pathname === "/api/admin/oidc-session") {
+      handleOidcSessionSubmit(req, res);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/admin/oidc-session") {
+      if (!requireAdmin(req, res)) return;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(
+        JSON.stringify(
+          liveOidcSession && liveOidcSession.sessionDeadline > Date.now()
+            ? { active: true, activeUntil: new Date(liveOidcSession.sessionDeadline).toISOString() }
+            : { active: false }
+        )
+      );
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/join-requests") {
       handleJoinRequestSubmit(req, res, joinRequests, participants);
       return;
@@ -972,4 +1081,15 @@ module.exports = {
   mintGrants,
   cpFetch,
   automateApproval,
+  currentOidcToken,
+  handleOidcSessionSubmit,
+  refreshOidcToken,
+  // Test-only: liveOidcSession/oidcRefreshTimer are deliberately module-level (a real bridge
+  // process only ever has one), which means tests sharing this process need a way to reset them
+  // between cases rather than leaking a session (or a dangling setTimeout) into the next test.
+  resetOidcSessionForTests() {
+    if (oidcRefreshTimer) clearTimeout(oidcRefreshTimer);
+    oidcRefreshTimer = null;
+    liveOidcSession = null;
+  },
 };

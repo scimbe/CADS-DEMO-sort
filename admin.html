@@ -64,6 +64,20 @@
  .note{font-size:.85rem;margin-top:.6rem}
  .note[data-kind="ok"]{color:var(--ok)}
  .note[data-kind="error"]{color:var(--danger)}
+ .session-panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:.9rem 1.1rem;margin-bottom:1.6rem}
+ .session-panel .row{gap:.7rem}
+ .session-status{font-size:.85rem}
+ .session-status .dot{display:inline-block;width:.55em;height:.55em;border-radius:50%;
+  margin-right:.4em;background:var(--muted)}
+ .session-status[data-active="true"] .dot{background:var(--ok)}
+ .session-status[data-active="soon"] .dot{background:var(--fault)}
+ .session-status[data-active="soon"]{color:var(--fault)}
+ .session-form{display:flex;gap:.5rem;flex-wrap:wrap;align-items:center}
+ .session-form input{background:var(--bg);border:1px solid var(--line);border-radius:7px;
+  color:var(--ink);padding:.5rem .7rem;font:inherit;font-family:var(--mono);font-size:.8rem;
+  min-width:16rem}
+ .session-hint{font-size:.78rem;color:var(--muted);margin:.5rem 0 0;max-width:60ch}
 </style>
 </head>
 <body>
@@ -71,9 +85,30 @@
   <h1>Sort Arena — waiting room</h1>
   <p class="lede">See
     <a href="https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/">the
-    how-to</a> for the full reference. Approve failing with a 503? See
-    <a href="https://github.com/scimbe/CADS-DEMO-sort/blob/main/docs/operations.md">docs/operations.md</a>
-    (SORT_OIDC_TOKEN).</p>
+    how-to</a> for the full reference.</p>
+
+  <div class="session-panel">
+    <h2 style="margin-top:0">Automation session</h2>
+    <p class="session-status" id="session-status" data-active="false">
+      <span class="dot"></span><span id="session-status-text">checking…</span>
+    </p>
+    <form class="session-form" id="session-form">
+      <input type="email" id="session-email" placeholder="your account email"
+        autocomplete="username" required>
+      <input type="password" id="session-password" placeholder="your account password"
+        autocomplete="current-password" required>
+      <button type="submit" class="approve">Start 30-min automation session</button>
+    </form>
+    <p class="session-hint">
+      Approve needs a live control-plane credential. Typing your password here submits it
+      directly from this page to <code>auth.bunsenbrenner.org</code> in your own browser — it is
+      never sent to this bridge or logged anywhere; only the resulting access + refresh tokens
+      are, and only so the bridge can keep itself authorized for the next 30 minutes without
+      asking you again. See <a
+      href="https://github.com/scimbe/CADS-DEMO-sort/blob/main/docs/operations.md">docs/operations.md</a>
+      for exactly what this does and why it's safe.
+    </p>
+  </div>
 
   <h2>Pending (<span id="pending-count">0</span>)</h2>
   <p class="empty" id="pending-empty">Nobody waiting.</p>

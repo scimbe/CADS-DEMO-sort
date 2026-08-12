@@ -45,7 +45,98 @@ async function refresh() {
 
   const liveResp = await api("/api/participants/approved");
   renderLive(liveResp.error ? [] : liveResp.participants || []);
+
+  await refreshSessionStatus();
 }
+
+// --- Automation session: a real login form (see admin.html), not a workaround of anything --
+// the operator types their password into a real <input type=password> in their own browser; the
+// resulting tokens (never the password) are POSTed to the bridge, which self-refreshes them for
+// up to 30 minutes using only the refresh token. See docs/operations.md and server.js's
+// handleOidcSessionSubmit for the full design and why this is the legitimate way to do this.
+const sessionStatusEl = document.getElementById("session-status");
+const sessionStatusTextEl = document.getElementById("session-status-text");
+const sessionForm = document.getElementById("session-form");
+const sessionEmailInput = document.getElementById("session-email");
+const sessionPasswordInput = document.getElementById("session-password");
+
+// Below this remaining-time threshold, flip the dot amber -- the session is still genuinely
+// active (Approve will still work), but about to lapse, so the operator sees it coming instead
+// of only finding out when an Approve click 502s mid-click.
+const SESSION_WARN_MS = 3 * 60 * 1000;
+
+async function refreshSessionStatus() {
+  const resp = await api("/api/admin/oidc-session");
+  if (resp.error) {
+    sessionStatusEl.dataset.active = "false";
+    sessionStatusTextEl.textContent = `couldn't check: ${resp.error}`;
+    return;
+  }
+  if (!resp.active) {
+    sessionStatusEl.dataset.active = "false";
+    sessionStatusTextEl.textContent = "no active session -- Approve will fail closed";
+    return;
+  }
+  const remainingMs = new Date(resp.activeUntil).getTime() - Date.now();
+  sessionStatusEl.dataset.active = remainingMs <= SESSION_WARN_MS ? "soon" : "true";
+  const remainingMin = Math.max(0, Math.round(remainingMs / 60000));
+  sessionStatusTextEl.textContent =
+    remainingMs <= SESSION_WARN_MS
+      ? `active, but ends in ~${remainingMin} min -- log in again soon to keep it going`
+      : `active until ${new Date(resp.activeUntil).toLocaleTimeString()}`;
+}
+
+sessionForm.addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const submitBtn = sessionForm.querySelector("button");
+  submitBtn.disabled = true;
+  sessionStatusTextEl.textContent = "starting…";
+  try {
+    const info = await api("/api/channel-info");
+    if (!info.oidcIssuerBase) {
+      sessionStatusTextEl.textContent = "this deployment hasn't set SORT_OIDC_ISSUER_BASE -- see docs/operations.md";
+      return;
+    }
+    // This fetch call is the ONLY place the password is used -- it goes straight from this
+    // browser tab to Keycloak's own token endpoint, never through this bridge, never logged.
+    // Standard OAuth Resource Owner Password Credentials grant, same request shape
+    // mint-oidc-token.sh makes from a terminal -- just typed into a real form instead.
+    const tokenResp = await fetch(`${info.oidcIssuerBase.replace(/\/$/, "")}/protocol/openid-connect/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "password",
+        client_id: info.oidcClientId,
+        username: sessionEmailInput.value,
+        password: sessionPasswordInput.value,
+      }),
+    });
+    sessionPasswordInput.value = ""; // clear immediately, whether this succeeded or not
+    const tokenBody = await tokenResp.json().catch(() => ({}));
+    if (!tokenResp.ok) {
+      sessionStatusTextEl.textContent = `login failed: ${tokenBody.error_description || tokenBody.error || `HTTP ${tokenResp.status}`}`;
+      return;
+    }
+    const result = await api("/api/admin/oidc-session", {
+      body: {
+        accessToken: tokenBody.access_token,
+        refreshToken: tokenBody.refresh_token,
+        expiresIn: tokenBody.expires_in,
+        refreshExpiresIn: tokenBody.refresh_expires_in,
+      },
+    });
+    if (result.error) {
+      sessionStatusTextEl.textContent = `session start failed: ${result.error}`;
+      return;
+    }
+    await refreshSessionStatus();
+  } catch (e) {
+    sessionPasswordInput.value = "";
+    sessionStatusTextEl.textContent = `error: ${e.message}`;
+  } finally {
+    submitBtn.disabled = false;
+  }
+});
 
 function renderLive(entries) {
   liveListEl.innerHTML = "";

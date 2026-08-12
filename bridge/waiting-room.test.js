@@ -422,3 +422,99 @@ test(
     }
   }
 );
+
+// --- Automation session (admin.html's real login form -> POST /api/admin/oidc-session) --------
+
+test("currentOidcToken: falls back to the static SORT_OIDC_TOKEN when no live session exists", async () => {
+  await withEnv({ SORT_OIDC_TOKEN: "static-fallback-token" }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { currentOidcToken, resetOidcSessionForTests } = require("./server.js");
+    resetOidcSessionForTests();
+    assert.equal(currentOidcToken(), "static-fallback-token");
+  });
+});
+
+test("handleOidcSessionSubmit: fails closed (503) when SORT_ADMIN_EMAILS is unset", async () => {
+  await withEnv({ SORT_ADMIN_EMAILS: "" }, async () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { handleOidcSessionSubmit, resetOidcSessionForTests } = require("./server.js");
+    resetOidcSessionForTests();
+    const res = fakeRes();
+    await handleOidcSessionSubmit(fakeReq({ accessToken: "a", refreshToken: "r", expiresIn: 300, refreshExpiresIn: 1800 }, {}), res);
+    assert.equal(res.statusCode, 503);
+  });
+});
+
+test("handleOidcSessionSubmit: rejects a malformed body (400), never starts a session", async () => {
+  await withEnv({ SORT_ADMIN_EMAILS: "operator@example.com" }, async () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { handleOidcSessionSubmit, currentOidcToken, resetOidcSessionForTests } = require("./server.js");
+    resetOidcSessionForTests();
+    const res = fakeRes();
+    await handleOidcSessionSubmit(
+      fakeReq({ accessToken: "a", refreshToken: "r" }, { "x-gate-email": "operator@example.com" }),
+      res
+    );
+    assert.equal(res.statusCode, 400);
+    assert.equal(currentOidcToken(), undefined);
+  });
+});
+
+test(
+  "handleOidcSessionSubmit: starts a real self-refreshing session -- currentOidcToken reflects a live auto-refresh against a real stub issuer",
+  async () => {
+    await withEnv(
+      { SORT_ADMIN_EMAILS: "operator@example.com", SORT_OIDC_ISSUER_BASE: "placeholder-set-below" },
+      async () => {
+        // Real HTTP stub standing in for Keycloak's token endpoint: accepts one refresh_token
+        // grant, returns a NEW access/refresh token pair so the test can prove the bridge
+        // actually replaced the old access token, not just kept using the one it started with.
+        const refreshCalls = [];
+        const stub = require("node:http").createServer((req, res) => {
+          let body = "";
+          req.on("data", (c) => (body += c));
+          req.on("end", () => {
+            const params = new URLSearchParams(body);
+            refreshCalls.push(Object.fromEntries(params));
+            res.writeHead(200, { "content-type": "application/json" });
+            res.end(JSON.stringify({ access_token: "refreshed-access-token", refresh_token: "refreshed-refresh-token", expires_in: 300 }));
+          });
+        });
+        await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
+        const issuerBase = `http://127.0.0.1:${stub.address().port}`;
+        try {
+          await withEnv({ SORT_OIDC_ISSUER_BASE: issuerBase }, async () => {
+            delete require.cache[require.resolve("./server.js")];
+            const { handleOidcSessionSubmit, currentOidcToken, resetOidcSessionForTests } = require("./server.js");
+            resetOidcSessionForTests();
+            const res = fakeRes();
+            // expiresIn=1 is deliberately far below the 30s refresh margin, so scheduleNext's
+            // Math.max(5000, ...) clamp kicks in -- the refresh fires ~5s from now, in real
+            // wall-clock time. Short but real; this is the same "verify for real, don't mock the
+            // clock" discipline the rest of this file already uses for the grant-binary test.
+            await handleOidcSessionSubmit(
+              fakeReq(
+                { accessToken: "first-access-token", refreshToken: "first-refresh-token", expiresIn: 1, refreshExpiresIn: 1800 },
+                { "x-gate-email": "operator@example.com" }
+              ),
+              res
+            );
+            assert.equal(res.statusCode, 200, res.body);
+            assert.equal(currentOidcToken(), "first-access-token", "access token is live immediately, before any refresh has run");
+
+            await new Promise((resolve) => setTimeout(resolve, 6_000));
+
+            assert.equal(refreshCalls.length, 1, "exactly one real refresh_token grant call happened");
+            assert.equal(refreshCalls[0].grant_type, "refresh_token");
+            assert.equal(refreshCalls[0].refresh_token, "first-refresh-token");
+            assert.equal(currentOidcToken(), "refreshed-access-token", "currentOidcToken reflects the real refreshed value");
+
+            resetOidcSessionForTests();
+          });
+        } finally {
+          stub.close();
+        }
+      }
+    );
+  }
+);

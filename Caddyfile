@@ -79,7 +79,7 @@
 	# boundary is SORT_ADMIN_EMAILS either way, and this Caddy gate is defense-in-depth that only
 	# becomes fully effective once the operator turns "require login" on for this tunnel.
 	@gated-api {
-		path /api/join-requests /api/join-requests/* /api/participants/approved /api/participants/approved/*
+		path /api/join-requests /api/join-requests/* /api/participants/approved /api/participants/approved/* /api/admin/oidc-session
 	}
 	handle @gated-api {
 		route {
