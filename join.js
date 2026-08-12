@@ -207,16 +207,24 @@ function pollStatus(you) {
 }
 
 function renderApproved(channel, grant) {
-  showNote(`Approved! Channel ${channel}. Save your grant below and start your serve process.`, "ok");
+  showNote(`Approved! Channel ${channel}. Run this on your own machine to go live:`, "ok");
   const pre = document.createElement("pre");
   pre.className = "identity-priv";
+  // Fully filled in, including broker/relay from /api/channel-info (see handleChannelInfo's own
+  // comment -- not secret, every accepted participant needs them regardless) -- copy-paste ready,
+  // no cross-referencing docs/onboarding.md for two host:port strings. CT_AGENT_SERVICE_HANDLER_CMD
+  // is the one placeholder left: point it at your own verified handler.sh (docs/onboarding.md
+  // Step 4 covers the full CT_AGENT_SERVICES=text_generation / role-tag distinction).
   pre.textContent =
-    `CT_CHANNEL_ROLE=accept\n` +
-    `CT_CHANNEL_GRANT=${grant}\n` +
-    `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv}\n` +
-    `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv}\n` +
-    `# then run: ct-agent channel   (see docs/onboarding.md Step 4 for the full serve command,\n` +
-    `# including CT_CHANNEL_BROKER/CT_CHANNEL_RELAY for this deployment)`;
+    `CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \\\n` +
+    `CT_CHANNEL_BROKER=${channelInfo.channelBroker || "<ask the operator>"} ` +
+    `CT_CHANNEL_RELAY=${channelInfo.channelRelay || "<ask the operator>"} \\\n` +
+    `CT_CHANNEL_GRANT=${grant} \\\n` +
+    `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv} \\\n` +
+    `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv} \\\n` +
+    `CT_AGENT_SERVICE_HANDLER_CMD=./handler.sh \\\n` +
+    `CT_AGENT_SERVICES=text_generation \\\n` +
+    `  ct-agent channel`;
   identityBox.appendChild(pre);
 }
 

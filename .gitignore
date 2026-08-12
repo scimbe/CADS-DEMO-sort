@@ -13,3 +13,7 @@ participants/*/generated/
 # sort-channel-grant's own Rust build output -- vendored source lives in grant/, the built
 # binary is produced fresh by bridge/Dockerfile's grant-builder stage, never committed.
 /grant/target/
+
+# Same runtime state as /join-requests.json above, but written here when a bridge dev server
+# is run from inside bridge/ with a relative SORT_JOIN_REQUESTS_FILE path.
+/bridge/join-requests.json

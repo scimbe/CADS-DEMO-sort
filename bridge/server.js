@@ -647,15 +647,22 @@ async function automateApproval(pending) {
 
 // ---- Waiting room: route handlers --------------------------------------------------------------
 
-/** GET /api/channel-info -- public, unauthenticated. Both values are the deployment's own PUBLIC
- *  keys (never a secret), needed by a participant's own `ct-agent channel member-material` call
- *  (CT_CHANNEL_OPERATOR_PUBKEY / CT_CHANNEL_BRIDGE_HOLDER) to produce a join-request submission. */
+/** GET /api/channel-info -- public, unauthenticated. The pubkeys are the deployment's own PUBLIC
+ *  keys (never a secret), needed by a participant's own client-side identity generation
+ *  (channel_id_for_link(operatorPub, bridgeHolderPub, holderPub)) to produce a join-request
+ *  submission. broker/relay are this deployment's Agent-Fabric edge host:port -- also not
+ *  secret (every participant needs them to dial in after approval anyway, same values
+ *  docs/onboarding.md tells a manual joiner to read from GET <cp-url>/network-info) -- exposed
+ *  here too so join.js can hand back a fully filled-in serve command once approved, instead of
+ *  making the participant cross-reference a separate doc for two host:port strings. */
 function handleChannelInfo(req, res) {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(
     JSON.stringify({
       operatorPubkey: process.env.SORT_CHANNEL_OPERATOR_PUBKEY || null,
       bridgeHolderPubkey: process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY || null,
+      channelBroker: process.env.SORT_CHANNEL_BROKER || null,
+      channelRelay: process.env.SORT_CHANNEL_RELAY || null,
     })
   );
 }
