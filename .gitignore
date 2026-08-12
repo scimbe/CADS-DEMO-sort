@@ -5,3 +5,7 @@ participants/*/generated/
 # to these relative paths when unset -- real bridge-written data, never source, never committed).
 /join-requests.json
 /participants-approved.json
+
+# ct-agent-wasm build output (build-wasm.sh) -- generated, not source, same as
+# CADS-webconference-demo's own /pkg/ gitignore entry.
+/pkg/

@@ -77,6 +77,9 @@ services:
       - ./admin.js:/srv/admin.js:ro
       - ./join.html:/srv/join.html:ro
       - ./join.js:/srv/join.js:ro
+      # ct-agent-wasm build output -- run ./build-wasm.sh once (or whenever it needs updating)
+      # before `up`; join.js's client-side identity generation loads this at runtime.
+      - ./pkg:/srv/pkg:ro
       - ${SORT_CERT_DIR:?set SORT_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro
       - sort_demo_caddy_data:/data
     expose:

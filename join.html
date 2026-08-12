@@ -12,10 +12,13 @@
   as CADS-webconference-demo's request-access.html: none of those would be reachable for the
   person this page is actually for either.
 
-  This intentionally has more friction than "type your email" -- a channel identity is a real
-  cryptographic keypair plus an attestation, not something typeable, so the page shows the exact
-  commands to run locally instead of trying to collect the underlying secret material (which
-  never leaves your machine -- only public keys and a signature are ever pasted in here).
+  The channel identity (holder + noise keypair) is generated entirely client-side via
+  ct-agent-wasm (pkg/, wasm-bindgen output of ct-agent's own wasm/ crate -- "ct-agent for the
+  browser", already proven in CADS-webconference-demo) and the join-request attestation is signed
+  in-browser too -- no CLI install, nothing to copy-paste from a terminal. Only the resulting
+  PUBLIC keys + a signature ever leave this page; the PRIVATE keys stay in localStorage and are
+  shown once so the participant can save them for their own `ct-agent channel --serve` process
+  later (docs/onboarding.md Step 4, unchanged -- that still runs on their own machine).
 -->
 <style>
  :root{
@@ -60,6 +63,17 @@
  #note{margin-top:.8rem;font-size:.88rem}
  #note[data-kind="ok"]{color:var(--ok)}
  #note[data-kind="error"]{color:var(--danger)}
+ #identity-box{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  padding:1rem 1.1rem;margin-bottom:1.2rem}
+ .identity-pub{margin-bottom:.7rem}
+ .identity-pub code{display:block;margin-top:.3rem;background:var(--sunken);border:1px solid var(--line-soft);
+  border-radius:7px;padding:.5rem .7rem;font-size:.8rem;word-break:break-all;color:var(--muted2)}
+ .identity-warn{font-size:.82rem;color:var(--accent);margin-bottom:.6rem;line-height:1.5}
+ .identity-priv{background:var(--sunken);border:1px solid var(--line-soft);border-radius:7px;
+  padding:.7rem .9rem;font-size:.78rem;color:var(--muted2);white-space:pre-wrap;word-break:break-all;
+  margin:0 0 .7rem}
+ .identity-regen{margin-top:0;background:transparent;color:var(--muted);border:1px solid var(--line);
+  font-weight:400;font-size:.78rem;padding:.4rem .8rem}
 </style>
 </head>
 <body>
@@ -67,39 +81,22 @@
   <h1>Request to join Sort Arena</h1>
   <p class="lede">Your handler runs on your own machine, behind your own tunnel — never on this
     bridge. See <a href="https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/">the
-    how-to</a> if you haven't written a handler yet; this page is only step 4, requesting a
-    channel to reach it.</p>
+    how-to</a> if you haven't written a handler yet; this page only requests the channel to reach
+    it once you have.</p>
 
-  <h2>Step 1 — generate your own channel identity (if you haven't already)</h2>
-  <div class="step"><pre>ct-agent channel init
-# exports/prints your holder + noise PRIVATE and PUBLIC keys -- keep the private ones,
-# never share or paste them anywhere</pre></div>
+  <h2>Your channel identity</h2>
+  <div id="identity-box">generating…</div>
 
-  <h2>Step 2 — derive your join material</h2>
-  <div class="step">
-    <div>Run this with your own holder private key and noise public key from step 1:</div>
-    <pre id="member-material-cmd">loading this deployment's public channel identity…</pre>
-    <div>Prints <code>holder_pubkey</code>, <code>noise_pubkey</code>, <code>channel_id</code>,
-      and <code>noise_attestation</code> — paste the first, second, and fourth into the form
-      below. Nothing here is secret; only your holder private key ever stayed on your machine.</div>
-  </div>
-
-  <h2>Step 3 — submit</h2>
+  <h2>Submit</h2>
   <form id="join-form">
     <label for="you">Participant id</label>
-    <input id="you" name="you" placeholder="your-id" pattern="[a-z0-9][a-z0-9-]{0,63}" required>
+    <input id="you" name="you" placeholder="your-id" pattern="[a-z0-9][a-z0-9\-]{0,63}" required>
     <label for="label">Display label</label>
     <input id="label" name="label" placeholder="Your strategy, in a few words">
-    <label for="holderPub">holder_pubkey</label>
-    <input id="holderPub" name="holderPub" placeholder="64 hex chars" pattern="[0-9a-fA-F]{64}" required>
-    <label for="noisePub">noise_pubkey</label>
-    <input id="noisePub" name="noisePub" placeholder="64 hex chars" pattern="[0-9a-fA-F]{64}" required>
-    <label for="attestation">noise_attestation</label>
-    <input id="attestation" name="attestation" placeholder="128 hex chars" pattern="[0-9a-fA-F]{128}" required>
     <button type="submit">Request to join</button>
   </form>
   <div id="note"></div>
 </div>
-<script src="./join.js"></script>
+<script type="module" src="./join.js"></script>
 </body>
 </html>
