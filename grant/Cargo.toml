@@ -1,0 +1,16 @@
+[package]
+name = "sort-channel-grant"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+
+[[bin]]
+name = "sort-channel-grant"
+path = "src/main.rs"
+
+[dependencies]
+# Pinned to a real CADS-Tunnel release tag, same convention CADS-webconference-demo's own
+# ct-video-call-grant uses -- no local path, this repo is standalone. Bump deliberately.
+ct-common = { git = "https://github.com/scimbe/CADS-Tunnel", tag = "v0.4.13" }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"

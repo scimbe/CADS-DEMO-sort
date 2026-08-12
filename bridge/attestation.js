@@ -25,6 +25,11 @@ const crypto = require("node:crypto");
 // SPKI structure has no variable-length fields ahead of the key itself) — lets node:crypto verify
 // a raw key without a PEM/x509 round-trip. Confirmed against Node 20 (the bridge's own runtime).
 const ED25519_SPKI_DER_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
+// Ed25519 PKCS8 DER prefix for a raw 32-byte private key (fixed, same reasoning as the SPKI
+// prefix above) — lets node:crypto sign with a raw key with no PEM round-trip. Confirmed against
+// Node 20; used only for the BRIDGE's own attestation (Phase 2's mintGrants flow) — a
+// participant's own private key never reaches this file or this process at all.
+const ED25519_PKCS8_DER_PREFIX = Buffer.from("302e020100300506032b657004220420", "hex");
 
 /** Preimage::new(domain).fixed(...).fixed(...)... — u32-LE length-prefixed domain, then fields
  *  appended verbatim (preimage.rs). Only fixed-width fields are used anywhere in this file, so
@@ -89,8 +94,26 @@ function verifyMemberNoiseAttestation(channel, holder, noisePubkey, signature) {
   }
 }
 
+function rawEd25519PrivateKey(raw32) {
+  return crypto.createPrivateKey({
+    key: Buffer.concat([ED25519_PKCS8_DER_PREFIX, raw32]),
+    format: "der",
+    type: "pkcs8",
+  });
+}
+
+/** Sign memberNoiseAttestBytes(channel, holder, noisePubkey) with `holderPriv` -- the bridge's
+ *  own equivalent of what a participant's `ct-agent channel member-material`/join.js's WASM call
+ *  already does for them. Used only to produce the bridge's OWN attestation when registering a
+ *  channel (Phase 2's handleJoinRequestApprove) -- never for anyone else's key. */
+function signMemberNoiseAttestation(channel, holderPriv, holderPub, noisePubkey) {
+  const keyObj = rawEd25519PrivateKey(holderPriv);
+  return crypto.sign(null, memberNoiseAttestBytes(channel, holderPub, noisePubkey), keyObj);
+}
+
 module.exports = {
   channelIdForLink,
   memberNoiseAttestBytes,
   verifyMemberNoiseAttestation,
+  signMemberNoiseAttestation,
 };

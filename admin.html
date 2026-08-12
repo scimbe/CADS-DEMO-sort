@@ -12,10 +12,11 @@
   admin route regardless (never trust the client alone), so this page assumes it's talking to
   an already-authenticated session and doesn't do its own login flow.
 
-  Phase 1 scope (see the waiting-room plan): Approve does not automatically mint a channel grant
-  or register with the control plane -- it hands back the real commands (ct-agent channel
-  register/grant) the operator runs once, by hand, then pastes the resulting cmd string back in
-  here to actually go live. See docs/onboarding.md Step 4 for the full command reference.
+  Approve is fully automated: it mints both channel grants and registers the channel + both
+  members with the control plane for real (see server.js's automateApproval) -- the participant
+  is live the moment the API call returns, no manual command-pasting step. If the deployment
+  isn't configured for automation (missing SORT_CHANNEL_*/SORT_CP_URL/SORT_OIDC_TOKEN env vars),
+  Approve fails closed with a 503 rather than silently falling back to a manual flow.
 -->
 <style>
  :root{
@@ -59,13 +60,7 @@
  button:hover{border-color:var(--accent)}
  button:disabled{opacity:.5;cursor:not-allowed}
  button.approve{background:var(--accent-soft);color:#fff;border-color:var(--accent-soft)}
- button.decline{color:var(--danger);border-color:var(--danger)}
- .steps{margin-top:.8rem;background:var(--sunken);border:1px solid var(--line-soft);border-radius:8px;
-  padding:.8rem 1rem;font-size:.8rem}
- .steps pre{white-space:pre-wrap;word-break:break-all;margin:.3rem 0;color:var(--muted2)}
- .finish{display:flex;gap:.5rem;margin-top:.7rem;flex-wrap:wrap}
- .finish input{flex:1;min-width:14rem;background:var(--bg);border:1px solid var(--line);border-radius:7px;
-  color:var(--ink);padding:.5rem .7rem;font:inherit;font-family:var(--mono);font-size:.8rem}
+ button.decline,button.revoke{color:var(--danger);border-color:var(--danger)}
  .note{font-size:.85rem;margin-top:.6rem}
  .note[data-kind="ok"]{color:var(--ok)}
  .note[data-kind="error"]{color:var(--danger)}
@@ -74,15 +69,17 @@
 <body>
 <div class="shell">
   <h1>Sort Arena — waiting room</h1>
-  <p class="lede">Pending join requests. Approving one does not go live automatically in this
-    phase — it hands you the real <code>ct-agent</code> commands to run once; paste the
-    resulting <code>cmd</code> string back in to finish. See
+  <p class="lede">See
     <a href="https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/">the
     how-to</a> for the full reference.</p>
 
   <h2>Pending (<span id="pending-count">0</span>)</h2>
   <p class="empty" id="pending-empty">Nobody waiting.</p>
   <ul id="pending-list"></ul>
+
+  <h2>Live, self-service admitted (<span id="live-count">0</span>)</h2>
+  <p class="empty" id="live-empty">Nobody admitted through the waiting room yet.</p>
+  <ul id="live-list"></ul>
 </div>
 <script src="./admin.js"></script>
 </body>

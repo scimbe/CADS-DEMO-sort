@@ -43,7 +43,7 @@
 
 const http = require("node:http");
 const fs = require("node:fs");
-const { spawn } = require("node:child_process");
+const { spawn, execFile } = require("node:child_process");
 const {
   DEFAULT_BUDGET,
   DEFAULT_TIMEOUT_MS,
@@ -52,7 +52,7 @@ const {
   runRaceSession,
   runPartitionSession,
 } = require("./server.lib.js");
-const { channelIdForLink, verifyMemberNoiseAttestation } = require("./attestation.js");
+const { channelIdForLink, verifyMemberNoiseAttestation, signMemberNoiseAttestation } = require("./attestation.js");
 
 const LISTEN = process.env.SORT_BRIDGE_LISTEN || "0.0.0.0:8789";
 const TIMEOUT_MS = Number(process.env.SORT_ROUND_TIMEOUT_MS || DEFAULT_TIMEOUT_MS);
@@ -139,6 +139,49 @@ function addApprovedParticipant(participants, entry) {
   next.push(entry);
   writeJsonFileAtomic(approvedPath, next);
   participants.set(entry.you, entry);
+}
+
+/** The current contents of SORT_PARTICIPANTS_APPROVED_FILE -- deliberately only that file, never
+ *  the operator's own base SORT_PARTICIPANTS_FILE, so the admin "revoke" action below can only
+ *  ever touch a self-service-admitted entry, never something the operator hand-curated. */
+function listApprovedParticipants() {
+  const approvedPath = process.env.SORT_PARTICIPANTS_APPROVED_FILE;
+  if (!approvedPath || !fs.existsSync(approvedPath)) return [];
+  try {
+    const list = JSON.parse(fs.readFileSync(approvedPath, "utf8"));
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Remove one entry (by id) from SORT_PARTICIPANTS_APPROVED_FILE and from the live bridge
+ *  immediately -- the inverse of addApprovedParticipant. Only ever removes from the approved
+ *  file; if `you` isn't in there (e.g. it's a base-file entry, or already gone), this is a no-op
+ *  that returns false rather than reaching into the base file or throwing. Once revoked, the
+ *  same participant id is free again -- handleJoinRequestSubmit's `participants.has(you)` check
+ *  no longer blocks a fresh join request for it. */
+function removeApprovedParticipant(participants, you) {
+  const approvedPath = process.env.SORT_PARTICIPANTS_APPROVED_FILE;
+  if (!approvedPath) throw new Error("SORT_PARTICIPANTS_APPROVED_FILE is not configured");
+  const existing = listApprovedParticipants();
+  if (!existing.some((p) => p && p.you === you)) return false;
+  const next = existing.filter((p) => p && p.you !== you);
+  writeJsonFileAtomic(approvedPath, next);
+  // Only delete from the live Map if the base file doesn't ALSO define this id -- an operator
+  // could plausibly have both (approved-file entry overriding a base one, per loadParticipants'
+  // own precedence), and revoking the approved one should fall back to the base entry, not wipe
+  // the participant off the live roster entirely if the operator still wants it there.
+  const base = parseParticipantsJson(
+    process.env.SORT_PARTICIPANTS_JSON ||
+      (process.env.SORT_PARTICIPANTS_FILE && fs.existsSync(process.env.SORT_PARTICIPANTS_FILE)
+        ? fs.readFileSync(process.env.SORT_PARTICIPANTS_FILE, "utf8")
+        : "[]"),
+    "SORT_PARTICIPANTS_JSON/FILE"
+  );
+  if (base.has(you)) participants.set(you, base.get(you));
+  else participants.delete(you);
+  return true;
 }
 
 // ---- Waiting room: admin auth ----------------------------------------------------------------
@@ -452,6 +495,156 @@ async function handlePartition(req, res, participants, ids, query) {
   res.end();
 }
 
+// ---- Waiting room: approval automation (grant-minting + control-plane registration) -----------
+//
+// Requires the private-key/control-plane env vars configured (automationConfigured() below);
+// handleJoinRequestApprove fails closed (503) if they're missing, rather than accepting an
+// approve click it can't actually finish.
+//
+// _FILE convention (Docker secrets): if <NAME>_FILE is set, read the value from that file (a
+// Docker `secrets:` mount lands outside `environment:`/`docker inspect` output); otherwise fall
+// back to the plain env var. Mirrors CADS-webconference-demo/bridge/server.js's readSecret
+// exactly.
+function readSecret(name) {
+  const filePath = process.env[`${name}_FILE`];
+  if (filePath) {
+    try {
+      return fs.readFileSync(filePath, "utf8").trim();
+    } catch (e) {
+      process.stderr.write(`bridge: failed to read ${name}_FILE (${filePath}): ${e.message}\n`);
+      return undefined;
+    }
+  }
+  return process.env[name];
+}
+
+function automationConfigured() {
+  return Boolean(
+    readSecret("SORT_CHANNEL_OPERATOR_KEY") &&
+      readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY") &&
+      readSecret("SORT_CHANNEL_BRIDGE_NOISE_KEY") &&
+      process.env.SORT_CP_URL &&
+      readSecret("SORT_OIDC_TOKEN") &&
+      process.env.SORT_CHANNEL_BROKER &&
+      process.env.SORT_CHANNEL_RELAY
+  );
+}
+
+// sort-channel-grant's own MAX_TTL_SECS (grant/src/main.rs) is 30 days -- passing anything
+// higher is a hard, real rejection from the binary itself, not a soft cap. Caught live by this
+// file's own integration test: an earlier version of this constant (365 days) made every real
+// mint call fail. A participant's grant needs re-approving after this window; that's a real,
+// disclosed limitation of the vendored crate's own design, not something to silently work around
+// by forking it to accept a longer TTL.
+const GRANT_TTL_SECS = 30 * 24 * 3600;
+
+/** Shells out to the vendored sort-channel-grant binary (grant/, built into the bridge image --
+ *  see Dockerfile) exactly the way CADS-webconference-demo's own mintGrants does: the operator's
+ *  private key is passed via --operator-private-file (a Docker-secrets-mounted path) whenever
+ *  configured, so it never sits in this child process's own argv/`/proc/<pid>/cmdline` even
+ *  transiently -- only the key VALUE needs to stay secret, and reading it via _FILE here already
+ *  keeps it out of THIS process's argv; --operator-private-file additionally keeps it out of the
+ *  grant binary's argv too. */
+function mintGrants(holderAHex, holderBHex) {
+  return new Promise((resolve, reject) => {
+    const grantBin = process.env.SORT_GRANT_BIN || "/usr/local/bin/sort-channel-grant";
+    const operatorKeyFile = process.env.SORT_CHANNEL_OPERATOR_KEY_FILE;
+    const operatorArgs = operatorKeyFile
+      ? ["--operator-private-file", operatorKeyFile]
+      : ["--operator-private", readSecret("SORT_CHANNEL_OPERATOR_KEY")];
+    execFile(
+      grantBin,
+      [holderAHex, holderBHex, ...operatorArgs, "--ttl-secs", String(GRANT_TTL_SECS)],
+      { timeout: 10_000, maxBuffer: 1024 * 1024 },
+      (err, stdout) => {
+        if (err) return reject(err);
+        const out = {};
+        for (const line of stdout.trim().split("\n")) {
+          const idx = line.indexOf("=");
+          if (idx === -1) continue;
+          out[line.slice(0, idx)] = line.slice(idx + 1);
+        }
+        if (!out.channel_id_hex || !out.grant_a_hex || !out.grant_b_hex) {
+          return reject(new Error(`unexpected sort-channel-grant output: ${stdout}`));
+        }
+        resolve({ channel: out.channel_id_hex, grantA: out.grant_a_hex, grantB: out.grant_b_hex, operatorPub: out.operator_public_hex });
+      }
+    );
+  });
+}
+
+/** POST to the control plane with a bearer token -- the simplest of CADS-webconference-demo's
+ *  three auth tiers (service-account client_credentials preferred there; this deployment starts
+ *  with the same manually-refreshed-token fallback tier, since standing up a service-account
+ *  client is a real, separate operational step, not a code change). SORT_OIDC_TOKEN needs
+ *  refreshing whenever it expires (a realm's default is typically minutes, not hours) -- until a
+ *  service-account credential is wired in, that's a real operational limitation of Phase 2 worth
+ *  documenting, not hiding. */
+async function cpFetch(path, body) {
+  const token = readSecret("SORT_OIDC_TOKEN");
+  const resp = await fetch(`${process.env.SORT_CP_URL}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const text = await resp.text().catch(() => "");
+  return { status: resp.status, text };
+}
+
+/** Full Phase 2 automation for one approval: mint both grants, register the channel + both
+ *  members with the control plane, and construct the real `cmd` string -- the bridge's own
+ *  attestation is signed fresh here (signMemberNoiseAttestation), the participant's was already
+ *  verified at submit time (handleJoinRequestSubmit) and is reused as-is. Never fabricates
+ *  success: any failed step returns {ok:false, detail} with the exact response, the same "report
+ *  the real failure, don't pretend it worked" discipline CADS-webconference-demo's tryRegister
+ *  uses. Throws only on a genuine local/programming error (e.g. mintGrants' own process spawn
+ *  failure) -- HTTP-level control-plane failures are returned, not thrown. */
+async function automateApproval(pending) {
+  const bridgeHolderPub = process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY;
+  const bridgeHolderPriv = Buffer.from(readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY"), "hex");
+  const bridgeNoisePriv = Buffer.from(readSecret("SORT_CHANNEL_BRIDGE_NOISE_KEY"), "hex");
+  // The bridge's own noise PUBLIC key -- derivable from the private key, but this repo has no
+  // "derive Ed25519 pubkey from privkey" helper of its own; simplest correct source is to
+  // require it configured explicitly, matching how the holder pubkey is already configured.
+  const bridgeNoisePub = process.env.SORT_CHANNEL_BRIDGE_NOISE_PUBKEY;
+  if (!bridgeNoisePub) return { ok: false, detail: "SORT_CHANNEL_BRIDGE_NOISE_PUBKEY is not configured" };
+
+  const minted = await mintGrants(bridgeHolderPub, pending.holderPub);
+  const channelBuf = Buffer.from(minted.channel, "hex");
+
+  const reg = await cpFetch("/me/channels", { channel: minted.channel, operator_pubkey: minted.operatorPub });
+  if (reg.status !== 200) {
+    return { ok: false, detail: `POST /me/channels -> ${reg.status} ${reg.text}`.slice(0, 400) };
+  }
+
+  const bridgeAttestation = signMemberNoiseAttestation(channelBuf, bridgeHolderPriv, Buffer.from(bridgeHolderPub, "hex"), bridgeNoisePub && Buffer.from(bridgeNoisePub, "hex"));
+  const memBridge = await cpFetch(`/me/channels/${minted.channel}/members`, {
+    holder: bridgeHolderPub,
+    noise_pubkey: bridgeNoisePub,
+    noise_attestation: bridgeAttestation.toString("hex"),
+  });
+  const memParticipant = await cpFetch(`/me/channels/${minted.channel}/members`, {
+    holder: pending.holderPub,
+    noise_pubkey: pending.noisePub,
+    noise_attestation: pending.attestation,
+  });
+  if (memBridge.status !== 200 || memParticipant.status !== 200) {
+    return {
+      ok: false,
+      detail: `members -> bridge=${memBridge.status} participant=${memParticipant.status} ${memBridge.text || memParticipant.text}`.slice(0, 400),
+    };
+  }
+
+  const cmd =
+    `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=text_generation ` +
+    `CT_CHANNEL_GRANT=${minted.grantA} ` +
+    `CT_CHANNEL_HOLDER_KEY=${bridgeHolderPriv.toString("hex")} CT_CHANNEL_NOISE_KEY=${bridgeNoisePriv.toString("hex")} ` +
+    `CT_CHANNEL_BROKER=${process.env.SORT_CHANNEL_BROKER} CT_CHANNEL_RELAY=${process.env.SORT_CHANNEL_RELAY} ` +
+    `ct-agent channel`;
+
+  return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB };
+}
+
 // ---- Waiting room: route handlers --------------------------------------------------------------
 
 /** GET /api/channel-info -- public, unauthenticated. Both values are the deployment's own PUBLIC
@@ -521,55 +714,66 @@ function handleJoinRequestsList(req, res, joinRequests) {
   res.end(JSON.stringify({ requests: [...joinRequests.values()].sort((a, b) => a.createdAt - b.createdAt) }));
 }
 
-/** POST /api/join-requests/:you/approve -- admin-only. Phase 1 scope (see docs/onboarding.md /
- *  the waiting-room plan): does NOT mint a grant or call the control plane itself yet -- that's
- *  real crypto + a real credentialed network call, deliberately not automated in this pass (see
- *  the plan's "why this split" reasoning). Instead it resolves the request and hands back the
- *  exact commands an operator runs once by hand, pre-filled with this request's real values, then
- *  the operator finishes the loop via POST /api/participants/approved once they have the result. */
-function handleJoinRequestApprove(req, res, joinRequests, you) {
+/** POST /api/join-requests/:you/approve -- admin-only. Mints both grants, registers the channel
+ *  + both members with the control plane for real, and makes the participant live immediately --
+ *  one click, fully automatic. Requires automationConfigured() (operator/bridge private keys +
+ *  control-plane URL/token/broker/relay); if any of those is missing this fails closed (503)
+ *  rather than accepting a request it can't actually finish -- there is no manual fallback path,
+ *  a misconfigured deployment should say so plainly, not silently degrade to something else. */
+async function handleJoinRequestApprove(req, res, joinRequests, participants, pendingGrantDelivery, you) {
   if (!requireAdmin(req, res)) return;
   const pending = joinRequests.get(you);
   if (!pending) return jsonError(res, 404, `no pending join request for "${you}"`);
-  const operatorPubHex = process.env.SORT_CHANNEL_OPERATOR_PUBKEY;
-  const bridgeHolderHex = process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY;
-  if (!operatorPubHex || !bridgeHolderHex) return jsonError(res, 503, "channel identity not configured on this deployment");
-  const channel = channelIdForLink(
-    Buffer.from(operatorPubHex, "hex"),
-    Buffer.from(bridgeHolderHex, "hex"),
-    Buffer.from(pending.holderPub, "hex")
-  ).toString("hex");
+  if (!automationConfigured()) {
+    return jsonError(
+      res,
+      503,
+      "automation not configured on this deployment -- set SORT_CHANNEL_OPERATOR_KEY, SORT_CHANNEL_BRIDGE_HOLDER_KEY, " +
+        "SORT_CHANNEL_BRIDGE_NOISE_KEY, SORT_CP_URL, SORT_OIDC_TOKEN, SORT_CHANNEL_BROKER, SORT_CHANNEL_RELAY"
+    );
+  }
+
+  let result;
+  try {
+    result = await automateApproval(pending);
+  } catch (e) {
+    // A genuine local failure (grant binary missing/crashed, etc) -- log in full server-side,
+    // generic to the client, same discipline CADS-webconference-demo's mintGrants error path
+    // uses. The request stays pending (not deleted) so the operator can retry rather than
+    // losing it.
+    process.stderr.write(`join-requests: automated approval failed for "${you}": ${e.message}\n`);
+    return jsonError(res, 500, "automated approval failed -- see bridge logs");
+  }
+  if (!result.ok) {
+    // Real control-plane failure, reported honestly -- request stays pending, retryable.
+    return jsonError(res, 502, `automated approval failed: ${result.detail}`);
+  }
   joinRequests.delete(you);
   persistJoinRequests(joinRequests);
-  const expiresAt = Math.floor(Date.now() / 1000) + 365 * 24 * 3600;
+  addApprovedParticipant(participants, { you: pending.you, label: pending.label, cmd: result.cmd });
+  pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
   res.writeHead(200, { "content-type": "application/json" });
-  res.end(
-    JSON.stringify({
-      ok: true,
-      you: pending.you,
-      label: pending.label,
-      channel,
-      holderPub: pending.holderPub,
-      noisePub: pending.noisePub,
-      attestation: pending.attestation,
-      // Real, already-existing ct-agent subcommands -- no separately-vendored binary needed for
-      // this Phase 1 manual step. Full member-registration curl calls (POST
-      // /me/channels/:channel/members, once per side) are documented in docs/onboarding.md Step 4
-      // and deliberately not duplicated here. Once you have the resulting grant_a_hex (the
-      // bridge's own grant), finish via POST /api/participants/approved {you, label, cmd}.
-      manualSteps: [
-        `CT_AGENT_CP_URL=<this deployment's control-plane URL> CT_OIDC_TOKEN=<your bearer token> ` +
-          `CT_CHANNEL_OPERATOR_KEY=<operator private key> CT_GRANT_CHANNEL=${channel} ` +
-          `ct-agent channel register`,
-        `CT_CHANNEL_OPERATOR_KEY=<operator private key> CT_GRANT_CHANNEL=${channel} ` +
-          `CT_GRANT_MEMBER_HOLDER=${bridgeHolderHex} CT_GRANT_DIRECTION=initiate ` +
-          `CT_GRANT_EXPIRES=${expiresAt} ct-agent channel grant   # -> grant for the bridge itself`,
-        `CT_CHANNEL_OPERATOR_KEY=<operator private key> CT_GRANT_CHANNEL=${channel} ` +
-          `CT_GRANT_MEMBER_HOLDER=${pending.holderPub} CT_GRANT_DIRECTION=accept ` +
-          `CT_GRANT_EXPIRES=${expiresAt} ct-agent channel grant   # -> grant for "${pending.you}"`,
-      ],
-    })
-  );
+  res.end(JSON.stringify({ ok: true, you: pending.you, label: pending.label, channel: result.channel }));
+}
+
+/** GET /api/join-requests/:you/status -- public, unauthenticated. A participant's own join.js
+ *  polls this after submitting to learn whether they've been approved and, if automated, to
+ *  retrieve their own grant (grantB) -- the one piece of information only they actually need
+ *  and that never has anywhere else to go, since they're not the one running the admin panel.
+ *  Safe to leave unauthenticated: a grant is only USABLE by whoever holds the matching holder
+ *  private key, which never left the requester's own browser -- reading the grant string itself
+ *  reveals nothing exploitable to a third party who doesn't also hold that key. */
+function handleJoinRequestStatus(req, res, joinRequests, pendingGrantDelivery, you) {
+  if (pendingGrantDelivery.has(you)) {
+    const entry = pendingGrantDelivery.get(you);
+    pendingGrantDelivery.delete(you); // single delivery -- the participant's own join.js is the only reader
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ status: "approved", channel: entry.channel, grant: entry.grantB }));
+    return;
+  }
+  const status = joinRequests.has(you) ? "pending" : "unknown";
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ status }));
 }
 
 /** POST /api/join-requests/:you/decline -- admin-only. */
@@ -582,11 +786,12 @@ function handleJoinRequestDecline(req, res, joinRequests, you) {
   res.end(JSON.stringify({ ok: true }));
 }
 
-/** POST /api/participants/approved -- admin-only. The Phase 1 "paste the resulting cmd here"
- *  follow-up: once the operator has run the manual grant/registration commands
- *  handleJoinRequestApprove printed, this is what actually makes the participant live -- writes
- *  SORT_PARTICIPANTS_APPROVED_FILE and updates the running bridge's participants Map in one step,
- *  no restart needed (see addApprovedParticipant). */
+/** POST /api/participants/approved -- admin-only. A general "add a participant with an
+ *  already-known cmd" action -- not part of the join-request flow (handleJoinRequestApprove
+ *  handles that end to end automatically), but useful on its own for hand-adding an entry the
+ *  operator has already provisioned some other way. Writes SORT_PARTICIPANTS_APPROVED_FILE and
+ *  updates the running bridge's participants Map in one step, no restart needed (see
+ *  addApprovedParticipant). */
 async function handleAddApprovedParticipant(req, res, participants) {
   if (!requireAdmin(req, res)) return;
   let body;
@@ -610,9 +815,38 @@ async function handleAddApprovedParticipant(req, res, participants) {
   res.end(JSON.stringify({ ok: true, you }));
 }
 
+/** GET /api/participants/approved -- admin-only. Lists self-service-admitted participants (i.e.
+ *  SORT_PARTICIPANTS_APPROVED_FILE's own contents), so the admin panel can offer a Revoke action
+ *  distinct from the operator's own hand-curated base roster. */
+function handleListApprovedParticipants(req, res) {
+  if (!requireAdmin(req, res)) return;
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ participants: listApprovedParticipants() }));
+}
+
+/** POST /api/participants/approved/:you/revoke -- admin-only. Removes a self-service-admitted
+ *  participant so it stops being live and, critically, so the same id is free again for a fresh
+ *  join request (handleJoinRequestSubmit's duplicate check reads the live participants Map,
+ *  which this updates immediately -- see removeApprovedParticipant). */
+function handleRevokeApprovedParticipant(req, res, participants, you) {
+  if (!requireAdmin(req, res)) return;
+  const removed = removeApprovedParticipant(participants, you);
+  if (!removed) return jsonError(res, 404, `"${you}" is not a self-service-admitted participant`);
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true, you }));
+}
+
 function main() {
   const participants = loadParticipants();
   const joinRequests = loadJoinRequests();
+  // "you" -> {channel, grantB, createdAt} -- Phase 2's one-shot delivery slot for a participant's
+  // own grant, read once by their own join.js status poll (handleJoinRequestStatus) then deleted.
+  // In-memory only: if the bridge restarts before a participant polls, they're already fully
+  // registered with the control plane (that part is durable), just need the operator to re-run
+  // approve (idempotent-ish: mintGrants signs a fresh grant, registration calls are themselves
+  // idempotent server-side) -- an acceptable, disclosed gap rather than adding a third
+  // persisted-file format for what's meant to be a brief, one-time handoff.
+  const pendingGrantDelivery = new Map();
   const server = http.createServer((req, res) => {
     // Permissive CORS: this API carries no session/cookie/secret and never accepts a
     // client-supplied handler command (see the header comment), so there's nothing an
@@ -651,7 +885,7 @@ function main() {
     }
     const approveMatch = url.pathname.match(/^\/api\/join-requests\/([^/]+)\/approve$/);
     if (req.method === "POST" && approveMatch) {
-      handleJoinRequestApprove(req, res, joinRequests, decodeURIComponent(approveMatch[1]));
+      handleJoinRequestApprove(req, res, joinRequests, participants, pendingGrantDelivery, decodeURIComponent(approveMatch[1]));
       return;
     }
     const declineMatch = url.pathname.match(/^\/api\/join-requests\/([^/]+)\/decline$/);
@@ -659,8 +893,22 @@ function main() {
       handleJoinRequestDecline(req, res, joinRequests, decodeURIComponent(declineMatch[1]));
       return;
     }
+    const statusMatch = url.pathname.match(/^\/api\/join-requests\/([^/]+)\/status$/);
+    if (req.method === "GET" && statusMatch) {
+      handleJoinRequestStatus(req, res, joinRequests, pendingGrantDelivery, decodeURIComponent(statusMatch[1]));
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/participants/approved") {
       handleAddApprovedParticipant(req, res, participants);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/participants/approved") {
+      handleListApprovedParticipants(req, res);
+      return;
+    }
+    const revokeMatch = url.pathname.match(/^\/api\/participants\/approved\/([^/]+)\/revoke$/);
+    if (req.method === "POST" && revokeMatch) {
+      handleRevokeApprovedParticipant(req, res, participants, decodeURIComponent(revokeMatch[1]));
       return;
     }
     const runMatch = url.pathname.match(/^\/run\/([^/]+)$/);
@@ -692,6 +940,8 @@ module.exports = {
   loadParticipants,
   parseParticipantsJson,
   addApprovedParticipant,
+  listApprovedParticipants,
+  removeApprovedParticipant,
   callHandlerProcess,
   randomArray,
   handleRace,
@@ -702,9 +952,17 @@ module.exports = {
   handleJoinRequestsList,
   handleJoinRequestApprove,
   handleJoinRequestDecline,
+  handleJoinRequestStatus,
   handleAddApprovedParticipant,
+  handleListApprovedParticipants,
+  handleRevokeApprovedParticipant,
   loadJoinRequests,
   persistJoinRequests,
   gateVerifiedEmail,
   ADMIN_EMAILS,
+  readSecret,
+  automationConfigured,
+  mintGrants,
+  cpFetch,
+  automateApproval,
 };

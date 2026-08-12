@@ -23,26 +23,49 @@ x-logging: &default-logging
 services:
   sort-demo-bridge:
     build:
-      context: ./bridge
-      dockerfile: Dockerfile
+      # Repo root, not ./bridge -- the Dockerfile's grant-builder stage needs to see ../grant/.
+      context: .
+      dockerfile: bridge/Dockerfile
     environment:
       - SORT_BRIDGE_LISTEN=0.0.0.0:8789
       - SORT_PARTICIPANTS_FILE=/etc/sort-demo/participants.json
       - SORT_ROUND_TIMEOUT_MS=${SORT_ROUND_TIMEOUT_MS:-30000}
       - SORT_BUDGET=${SORT_BUDGET:-200}
-      # Waiting room (CADS-DEMO-sort#9 follow-up, Phase 1 -- see the plan). Unset
-      # SORT_ADMIN_EMAILS means every admin route fails closed (503); this is intentionally not
-      # a hard compose-level requirement (`:?`) the way SORT_PARTICIPANTS_CONFIG below is, since
-      # a deployment that doesn't want the waiting room at all should still start cleanly.
+      # Waiting room (CADS-DEMO-sort#9 follow-up). Unset SORT_ADMIN_EMAILS means every admin
+      # route fails closed (503); intentionally not a hard compose-level requirement (`:?`) the
+      # way SORT_PARTICIPANTS_CONFIG below is, since a deployment that doesn't want the waiting
+      # room at all should still start cleanly.
       - SORT_ADMIN_EMAILS=${SORT_ADMIN_EMAILS:-}
       - SORT_JOIN_REQUESTS_FILE=/var/lib/sort-demo/join-requests.json
       - SORT_PARTICIPANTS_APPROVED_FILE=/var/lib/sort-demo/participants-approved.json
       # This deployment's own Agent-Fabric channel identity, public halves only (see
-      # docs/onboarding.md / GET /api/channel-info) -- mint once with `ct-agent channel init`,
-      # keep the matching private keys wherever you run the manual grant step from (NOT in this
-      # container; Phase 1 never automates minting, see server.js's handleJoinRequestApprove).
+      # docs/onboarding.md / GET /api/channel-info) -- mint once with `ct-agent channel init`.
       - SORT_CHANNEL_OPERATOR_PUBKEY=${SORT_CHANNEL_OPERATOR_PUBKEY:-}
       - SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY=${SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY:-}
+      - SORT_CHANNEL_BRIDGE_NOISE_PUBKEY=${SORT_CHANNEL_BRIDGE_NOISE_PUBKEY:-}
+      # Full one-click approval automation (mint both grants, register the channel + both members
+      # for real) -- all seven of these must be set together or handleJoinRequestApprove fails
+      # closed (503), never half-automates. Private-key values: use the _FILE variant (Docker
+      # secrets mount) in any real deployment, never the plain env var below it.
+      - SORT_GRANT_BIN=/usr/local/bin/sort-channel-grant
+      - SORT_CHANNEL_OPERATOR_KEY=${SORT_CHANNEL_OPERATOR_KEY:-}
+      - SORT_CHANNEL_OPERATOR_KEY_FILE=${SORT_CHANNEL_OPERATOR_KEY_FILE:-}
+      - SORT_CHANNEL_BRIDGE_HOLDER_KEY=${SORT_CHANNEL_BRIDGE_HOLDER_KEY:-}
+      - SORT_CHANNEL_BRIDGE_HOLDER_KEY_FILE=${SORT_CHANNEL_BRIDGE_HOLDER_KEY_FILE:-}
+      - SORT_CHANNEL_BRIDGE_NOISE_KEY=${SORT_CHANNEL_BRIDGE_NOISE_KEY:-}
+      - SORT_CHANNEL_BRIDGE_NOISE_KEY_FILE=${SORT_CHANNEL_BRIDGE_NOISE_KEY_FILE:-}
+      # Control-plane base URL + a bearer token this bridge uses to register channels/members it
+      # mints grants for -- SORT_OIDC_TOKEN needs periodic manual refresh (a realm's default
+      # token lifetime is typically minutes, not hours) until a real service-account credential
+      # replaces it; a real, disclosed operational limitation, not hidden.
+      - SORT_CP_URL=${SORT_CP_URL:-}
+      - SORT_OIDC_TOKEN=${SORT_OIDC_TOKEN:-}
+      - SORT_OIDC_TOKEN_FILE=${SORT_OIDC_TOKEN_FILE:-}
+      # This deployment's Agent-Fabric edge broker/relay host:port -- read the real values from
+      # GET <cp-url>/network-info (channel_broker_port/channel_relay_port), same as
+      # docs/onboarding.md's own Step 4 already documents for a manual join.
+      - SORT_CHANNEL_BROKER=${SORT_CHANNEL_BROKER:-}
+      - SORT_CHANNEL_RELAY=${SORT_CHANNEL_RELAY:-}
     volumes:
       # Operator-owned participant config — which handler commands are live in this
       # deployment. Never derived from an HTTP request; see server.js's header comment.

@@ -8,6 +8,9 @@
 const listEl = document.getElementById("pending-list");
 const emptyEl = document.getElementById("pending-empty");
 const countEl = document.getElementById("pending-count");
+const liveListEl = document.getElementById("live-list");
+const liveEmptyEl = document.getElementById("live-empty");
+const liveCountEl = document.getElementById("live-count");
 
 async function api(path, opts) {
   const resp = await fetch(path, {
@@ -25,20 +28,100 @@ async function api(path, opts) {
   return body || {};
 }
 
+// Approving a request removes it from the server's pending list immediately and, since approval
+// is now fully automated (mints both grants, registers the channel + both members for real --
+// see handleJoinRequestApprove/automateApproval), the participant is live by the time the API
+// call returns. The row still stays visible for a moment as a completed confirmation rather than
+// just vanishing. Polling refresh() naively -- clearing and rebuilding the whole list every tick
+// -- would wipe that confirmation out from under the operator before they'd seen it. Instead:
+// in-flight rows are created ONCE and never touched again by refresh(); only the still-pending
+// section is torn down and rebuilt each poll.
+const inFlightYous = new Set(); // "you" ids currently rendered as an in-flight approval row
+
 async function refresh() {
   const resp = await api("/api/join-requests");
-  render(resp.error ? [] : resp.requests || []);
+  const pending = resp.error ? [] : resp.requests || [];
+  renderPending(pending);
+
+  const liveResp = await api("/api/participants/approved");
+  renderLive(liveResp.error ? [] : liveResp.participants || []);
 }
 
-function render(requests) {
-  listEl.innerHTML = "";
-  emptyEl.hidden = requests.length > 0;
-  countEl.textContent = String(requests.length);
-  for (const req of requests) renderRow(req);
+function renderLive(entries) {
+  liveListEl.innerHTML = "";
+  liveEmptyEl.hidden = entries.length > 0;
+  liveCountEl.textContent = String(entries.length);
+  for (const entry of entries) liveListEl.appendChild(renderLiveRow(entry));
 }
+
+function renderLiveRow(entry) {
+  const li = document.createElement("li");
+
+  const row = document.createElement("div");
+  row.className = "row";
+  const who = document.createElement("div");
+  who.className = "who";
+  who.textContent = `${entry.label || entry.you} `;
+  const idSpan = document.createElement("span");
+  idSpan.className = "id";
+  idSpan.textContent = `(${entry.you})`;
+  who.appendChild(idSpan);
+
+  const revokeBtn = document.createElement("button");
+  revokeBtn.type = "button";
+  revokeBtn.className = "revoke";
+  revokeBtn.textContent = "Revoke";
+  revokeBtn.addEventListener("click", async () => {
+    if (!confirm(`Revoke "${entry.you}"? They can submit a new join request afterward.`)) return;
+    revokeBtn.disabled = true;
+    const result = await api(`/api/participants/approved/${encodeURIComponent(entry.you)}/revoke`, { body: {} });
+    if (result.error) {
+      revokeBtn.disabled = false;
+      showNote(li, `couldn't revoke: ${result.error}`, "error");
+      return;
+    }
+    li.remove();
+    updateLiveCount();
+  });
+
+  row.append(who, revokeBtn);
+  li.appendChild(row);
+  return li;
+}
+
+function updateLiveCount() {
+  const count = liveListEl.querySelectorAll("li").length;
+  liveEmptyEl.hidden = count > 0;
+  liveCountEl.textContent = String(count);
+}
+
+function renderPending(requests) {
+  // Only ever remove/rebuild rows tagged .pending-row -- .in-flight-row rows are left alone.
+  listEl.querySelectorAll("li.pending-row").forEach((li) => li.remove());
+  const total = requests.length + inFlightYous.size;
+  emptyEl.hidden = total > 0;
+  countEl.textContent = String(total);
+  const inFlightAnchor = listEl.firstChild; // pending rows go before whatever in-flight rows exist
+  for (const req of requests) listEl.insertBefore(renderRow(req), inFlightAnchor);
+}
+
+function updateCount() {
+  const pendingCount = listEl.querySelectorAll("li.pending-row").length;
+  const total = pendingCount + inFlightYous.size;
+  emptyEl.hidden = total > 0;
+  countEl.textContent = String(total);
+}
+
+// Auto-refresh so a new request shows up without the operator having to reload -- same fixed-
+// interval polling shape as CADS-webconference-demo's own admin-facing lists (its incoming-call
+// poll). 5s: fast enough to feel live for a low-traffic admin panel, not aggressive enough to
+// matter at this scale.
+const POLL_INTERVAL_MS = 5000;
+setInterval(refresh, POLL_INTERVAL_MS);
 
 function renderRow(req) {
   const li = document.createElement("li");
+  li.className = "pending-row";
 
   const row = document.createElement("div");
   row.className = "row";
@@ -87,62 +170,31 @@ function renderRow(req) {
       showNote(li, `couldn't approve: ${resp.error}`, "error");
       return;
     }
-    renderManualSteps(li, resp);
+    // Reclassify in place: this exact <li> (already in the DOM) stops being torn down by future
+    // renderPending() calls, which only ever touch .pending-row. It's already gone from the
+    // server's own pending list at this point, so a poll would otherwise have nothing left to
+    // reconstruct it from anyway -- this is the only copy of this row that will ever exist.
+    li.className = "in-flight-row";
+    inFlightYous.add(resp.you);
+    renderApproved(li, resp);
+    updateCount();
   });
+
+  return li;
 }
 
-function renderManualSteps(li, resp) {
-  // Row survives approval (it's already removed from the pending queue server-side) so the
-  // operator can run the printed commands and finish here, rather than the row just vanishing
-  // and leaving them with nothing to act on.
+function renderApproved(li, resp) {
+  // Approval is fully automated -- by the time the API call above returns, the participant is
+  // already live (their grant delivered via GET /api/join-requests/:you/status, which their own
+  // join.js polls). Nothing left for the operator to do here but confirm it happened; this row
+  // also naturally disappears from the panel on the next full page load, since it's already off
+  // the server's pending list and renderLive() will pick it up from /api/participants/approved.
   li.querySelector(".actions").remove();
-  const steps = document.createElement("div");
-  steps.className = "steps";
-  const heading = document.createElement("div");
-  heading.textContent = `Run these once, then paste the resulting cmd for "${resp.you}" below:`;
-  steps.appendChild(heading);
-  for (const step of resp.manualSteps || []) {
-    const pre = document.createElement("pre");
-    pre.textContent = step;
-    steps.appendChild(pre);
-  }
-
-  const finish = document.createElement("div");
-  finish.className = "finish";
-  const cmdInput = document.createElement("input");
-  cmdInput.placeholder = "cmd, e.g. CT_CHANNEL_ROLE=initiate ... ct-agent channel";
-  const goLiveBtn = document.createElement("button");
-  goLiveBtn.type = "button";
-  goLiveBtn.className = "approve";
-  goLiveBtn.textContent = "Go live";
-  finish.append(cmdInput, goLiveBtn);
-  steps.appendChild(finish);
-
-  const note = document.createElement("div");
-  note.className = "note";
-  note.id = "note";
-  steps.appendChild(note);
-
-  goLiveBtn.addEventListener("click", async () => {
-    if (!cmdInput.value.trim()) {
-      showNote(li, "cmd is required", "error");
-      return;
-    }
-    goLiveBtn.disabled = true;
-    const result = await api("/api/participants/approved", {
-      body: { you: resp.you, label: resp.label, cmd: cmdInput.value.trim() },
-    });
-    if (result.error) {
-      goLiveBtn.disabled = false;
-      showNote(li, `couldn't go live: ${result.error}`, "error");
-      return;
-    }
-    showNote(li, `"${resp.you}" is live.`, "ok");
-    goLiveBtn.remove();
-    cmdInput.disabled = true;
-  });
-
-  li.appendChild(steps);
+  showNote(li, `"${resp.you}" approved and live (channel ${resp.channel}).`, "ok");
+  // Done -- no longer counts as work still in flight; the row stays visible as a completed
+  // confirmation rather than vanishing, since renderPending() never touches .in-flight-row rows.
+  inFlightYous.delete(resp.you);
+  updateCount();
 }
 
 function showNote(li, text, kind) {

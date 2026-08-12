@@ -161,12 +161,63 @@ form.addEventListener("submit", async (ev) => {
       submitBtn.disabled = false;
       return;
     }
-    showNote("Request submitted. An operator will review it — check back or wait to hear from them.", "ok");
-    submitBtn.disabled = false;
+    showNote("Request submitted. Waiting for an operator to review it…", "ok");
+    pollStatus(body.you);
   } catch (e) {
     showNote(`request failed: ${e.message}`, "error");
     submitBtn.disabled = false;
   }
 });
+
+// Approval is fully automated (see server.js's automateApproval) -- once an operator clicks
+// Approve, the bridge mints this participant's own grant and stashes it in pendingGrantDelivery
+// for exactly one delivery. Poll GET /api/join-requests/:you/status until it shows up (public by
+// design: a grant is only usable by whoever already holds the matching CT_CHANNEL_HOLDER_KEY/
+// CT_CHANNEL_NOISE_KEY, both of which never left this browser -- see handleJoinRequestStatus).
+const STATUS_POLL_MS = 4000;
+let statusPollTimer = null;
+function pollStatus(you) {
+  if (statusPollTimer) clearInterval(statusPollTimer);
+  statusPollTimer = setInterval(async () => {
+    let result;
+    try {
+      const resp = await fetch(`/api/join-requests/${encodeURIComponent(you)}/status`);
+      result = await resp.json();
+    } catch {
+      return; // transient network hiccup -- just try again next tick
+    }
+    if (result.status === "approved") {
+      clearInterval(statusPollTimer);
+      statusPollTimer = null;
+      renderApproved(result.channel, result.grant);
+    } else if (result.status === "unknown") {
+      // Not pending and no grant waiting -- either declined, or already delivered in an earlier
+      // tab/session (delivery is one-shot). Stop polling either way; nothing left to wait for.
+      clearInterval(statusPollTimer);
+      statusPollTimer = null;
+      showNote(
+        "No pending request or grant found for this identity — it may have been declined, or " +
+          "already delivered in another tab. Submit a new request if you need to.",
+        "error",
+      );
+      submitBtn.disabled = false;
+    }
+    // "pending": keep polling silently.
+  }, STATUS_POLL_MS);
+}
+
+function renderApproved(channel, grant) {
+  showNote(`Approved! Channel ${channel}. Save your grant below and start your serve process.`, "ok");
+  const pre = document.createElement("pre");
+  pre.className = "identity-priv";
+  pre.textContent =
+    `CT_CHANNEL_ROLE=accept\n` +
+    `CT_CHANNEL_GRANT=${grant}\n` +
+    `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv}\n` +
+    `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv}\n` +
+    `# then run: ct-agent channel   (see docs/onboarding.md Step 4 for the full serve command,\n` +
+    `# including CT_CHANNEL_BROKER/CT_CHANNEL_RELAY for this deployment)`;
+  identityBox.appendChild(pre);
+}
 
 boot();

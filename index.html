@@ -161,6 +161,9 @@
  .notice{border:1px solid var(--danger);border-left-width:3px;border-radius:10px;background:var(--panel);
   padding:.85rem 1rem;color:var(--muted2);font-size:.88rem;margin-bottom:1rem}
  .notice code{font-size:.8em}
+ .notice-static{border:1px solid var(--accent);border-left-width:3px;border-radius:10px;background:var(--panel);
+  padding:.75rem 1rem;color:var(--muted2);font-size:.86rem;margin:1rem 0 0;max-width:60ch}
+ .notice-static a{color:var(--accent)}
 
  section.explain{margin-top:2.4rem;max-width:60ch}
  section.explain h2{font-size:1.1rem;margin-bottom:.4rem}
@@ -182,9 +185,13 @@
   <div class="brand"><span class="flame"></span><a href="https://bunsenbrenner.org/">Bunsenbrenner.org</a><span>/ sort-arena</span>
    <a href="./admin.html" target="_blank" rel="noopener" style="margin-left:auto">Operator</a></div>
   <p class="eyebrow">CADS-Tunnel reference pipeline</p>
-  <h1>Same array, same one-move contract. Only the harness differs.</h1>
+  <h1>Together we sort.</h1>
   <p class="lede">Read <a href="https://scimbe.github.io/CADS-DEMO-sort-docs/">the docs</a> for what this
    is and how to bring your own participant.</p>
+  <p class="notice-static">Your handler runs on your own machine, over your own Agent-Fabric channel —
+   never on this bridge. This page and the bridge behind it only ever relay the round-input/move
+   JSON described in <a href="https://scimbe.github.io/CADS-DEMO-sort-docs/reference/move-protocol/">the
+   protocol</a>; no participant's code is ever executed here.</p>
  </div>
 </header>
 
@@ -265,14 +272,6 @@
   </div>
  </div>
 
- <section class="explain">
-  <h2>Reading the signature</h2>
-  <p>The sparkline on each scorecard is <code>inversionsOverTime</code> — how many pairs are still out of order after
-   each swap, computed by the bridge from the move trace and never self-reported. A methodical harness draws a clean
-   staircase down to zero. A harness that thrashes draws a jagged line that climbs back up, because it keeps undoing
-   its own work. A harness that never emits a valid move draws a flat line at its starting height and a fault count
-   that keeps climbing — which is exactly what the protocol promises: a bad participant is rendered, not crashed.</p>
- </section>
 </main>
 
 <footer class="site">

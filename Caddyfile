@@ -46,10 +46,22 @@
 		method GET
 		path /api/channel-info
 	}
+	# A participant's own join.js polls its OWN status by "you" id after submitting -- public by
+	# design (see handleJoinRequestStatus's own comment: a grant is only usable by whoever holds
+	# the matching private key, so reading the grant string itself isn't sensitive). Method+exact-
+	# shape matched, same discipline as @join-submit above, so this can never accidentally widen
+	# to also exempt /approve or /decline (which don't end in /status).
+	@join-status {
+		method GET
+		path /api/join-requests/*/status
+	}
 	handle @join-submit {
 		reverse_proxy sort-demo-bridge:8789
 	}
 	handle @channel-info {
+		reverse_proxy sort-demo-bridge:8789
+	}
+	handle @join-status {
 		reverse_proxy sort-demo-bridge:8789
 	}
 
@@ -67,7 +79,7 @@
 	# boundary is SORT_ADMIN_EMAILS either way, and this Caddy gate is defense-in-depth that only
 	# becomes fully effective once the operator turns "require login" on for this tunnel.
 	@gated-api {
-		path /api/join-requests /api/join-requests/* /api/participants/approved
+		path /api/join-requests /api/join-requests/* /api/participants/approved /api/participants/approved/*
 	}
 	handle @gated-api {
 		route {

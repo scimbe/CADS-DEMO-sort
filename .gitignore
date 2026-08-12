@@ -9,3 +9,7 @@ participants/*/generated/
 # ct-agent-wasm build output (build-wasm.sh) -- generated, not source, same as
 # CADS-webconference-demo's own /pkg/ gitignore entry.
 /pkg/
+
+# sort-channel-grant's own Rust build output -- vendored source lives in grant/, the built
+# binary is produced fresh by bridge/Dockerfile's grant-builder stage, never committed.
+/grant/target/

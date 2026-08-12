@@ -2,6 +2,7 @@
 
 const assert = require("node:assert/strict");
 const { test } = require("node:test");
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -260,37 +261,164 @@ test("admin routes: accept the configured admin, case-insensitively", async () =
 test("handleJoinRequestApprove: 404s on an unknown id, never fabricates a resolved request", async () => {
   await withEnv(
     { SORT_ADMIN_EMAILS: "operator@example.com", SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub, SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub },
-    () => {
+    async () => {
       delete require.cache[require.resolve("./server.js")];
       const { handleJoinRequestApprove } = require("./server.js");
       const res = fakeRes();
-      handleJoinRequestApprove({ headers: { "x-gate-email": "operator@example.com" } }, res, new Map(), "nobody");
+      await handleJoinRequestApprove({ headers: { "x-gate-email": "operator@example.com" } }, res, new Map(), new Map(), new Map(), "nobody");
       assert.equal(res.statusCode, 404);
     }
   );
 });
 
-test("handleJoinRequestApprove: on success, removes the request from the queue and returns the real channel id", async () => {
+test("handleJoinRequestApprove: fails closed (503) when automation isn't configured, request stays pending", async () => {
   await withEnv(
-    {
-      SORT_ADMIN_EMAILS: "operator@example.com",
-      SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
-      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
-      SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
-    },
-    () => {
+    { SORT_ADMIN_EMAILS: "operator@example.com" },
+    async () => {
       delete require.cache[require.resolve("./server.js")];
       const { handleJoinRequestApprove } = require("./server.js");
       const joinRequests = new Map([
         ["real-participant", { you: "real-participant", label: "RP", holderPub: vectors.holder_a_pub, noisePub: vectors.noise_a_pub, attestation: vectors.positive.signature, createdAt: 1 }],
       ]);
       const res = fakeRes();
-      handleJoinRequestApprove({ headers: { "x-gate-email": "operator@example.com" } }, res, joinRequests, "real-participant");
-      assert.equal(res.statusCode, 200);
-      const body = JSON.parse(res.body);
-      assert.equal(body.channel, vectors.channel_id_for_link_a_b);
-      assert.equal(joinRequests.size, 0, "approved request must leave the pending queue");
-      assert.ok(Array.isArray(body.manualSteps) && body.manualSteps.length > 0);
+      await handleJoinRequestApprove({ headers: { "x-gate-email": "operator@example.com" } }, res, joinRequests, new Map(), new Map(), "real-participant");
+      assert.equal(res.statusCode, 503);
+      assert.equal(joinRequests.size, 1, "an approval that can't finish must not remove the request from the queue");
     }
   );
 });
+
+// Full automation, end to end, against the REAL vendored grant binary (built once here, same as
+// CI would need to) and a real local HTTP server standing in for the control plane -- not fully
+// mocked, per this project's own "verify for real" ethos. The grant-minting crypto itself is
+// already covered by grant/'s own Rust test suite (12 tests, including a real ct_common::verify
+// round trip) and this file's signMemberNoiseAttestation test; this test's job is to prove
+// server.js actually WIRES it all together correctly (right args, right env, parses stdout,
+// makes the right CP calls, ends up with a live participant and a delivered grant) -- not to
+// re-verify the crypto underneath it.
+const GRANT_BIN_PATH = path.join(__dirname, "..", "grant", "target", "release", "sort-channel-grant");
+const grantBinAvailable = fs.existsSync(GRANT_BIN_PATH);
+
+test(
+  "handleJoinRequestApprove: full automation succeeds end to end against the real grant binary + a real control-plane stub",
+  { skip: !grantBinAvailable && "grant binary not built (run: cd grant && cargo build --release)" },
+  async () => {
+    // Fresh, real Ed25519 identities -- not the shared testdata vectors, so this test doesn't
+    // silently depend on their specific values meaning anything here.
+    const genIdentity = () => {
+      const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+      return {
+        pub: publicKey.export({ type: "spki", format: "der" }).subarray(-32),
+        priv: privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32),
+      };
+    };
+    const operator = genIdentity();
+    const bridge = { holder: genIdentity(), noise: genIdentity() };
+    const participant = { holder: genIdentity(), noise: genIdentity() };
+
+    const { channelIdForLink, memberNoiseAttestBytes } = require("./attestation.js");
+    const channel = channelIdForLink(operator.pub, bridge.holder.pub, participant.holder.pub);
+    const participantAttestationMsg = memberNoiseAttestBytes(channel, participant.holder.pub, participant.noise.pub);
+    const participantSigKey = crypto.createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), participant.holder.priv]),
+      format: "der",
+      type: "pkcs8",
+    });
+    const participantAttestation = crypto.sign(null, participantAttestationMsg, participantSigKey);
+
+    // Stub control plane: real HTTP server, accepts the two real endpoints automateApproval
+    // calls, records what it received so the test can assert on it.
+    const received = [];
+    const stub = require("node:http").createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        received.push({ method: req.method, url: req.url, body: JSON.parse(body || "{}") });
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ ok: true }));
+      });
+    });
+    await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
+    const cpUrl = `http://127.0.0.1:${stub.address().port}`;
+
+    const operatorKeyFile = tmpFile("operator.key");
+    fs.writeFileSync(operatorKeyFile, operator.priv.toString("hex"));
+
+    try {
+      await withEnv(
+        {
+          SORT_ADMIN_EMAILS: "operator@example.com",
+          SORT_GRANT_BIN: GRANT_BIN_PATH,
+          SORT_CHANNEL_OPERATOR_KEY_FILE: operatorKeyFile,
+          SORT_CHANNEL_BRIDGE_HOLDER_KEY: bridge.holder.priv.toString("hex"),
+          SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: bridge.holder.pub.toString("hex"),
+          SORT_CHANNEL_BRIDGE_NOISE_KEY: bridge.noise.priv.toString("hex"),
+          SORT_CHANNEL_BRIDGE_NOISE_PUBKEY: bridge.noise.pub.toString("hex"),
+          SORT_CP_URL: cpUrl,
+          SORT_OIDC_TOKEN: "test-token",
+          SORT_CHANNEL_BROKER: "test-edge:4435",
+          SORT_CHANNEL_RELAY: "test-edge:4436",
+          SORT_PARTICIPANTS_APPROVED_FILE: tmpFile("participants-approved.json"),
+        },
+        async () => {
+          delete require.cache[require.resolve("./server.js")];
+          const { handleJoinRequestApprove } = require("./server.js");
+          const joinRequests = new Map([
+            [
+              "real-participant",
+              {
+                you: "real-participant",
+                label: "Real Participant",
+                holderPub: participant.holder.pub.toString("hex"),
+                noisePub: participant.noise.pub.toString("hex"),
+                attestation: participantAttestation.toString("hex"),
+                createdAt: Date.now(),
+              },
+            ],
+          ]);
+          const liveParticipants = new Map();
+          const pendingGrantDelivery = new Map();
+          const res = fakeRes();
+
+          await handleJoinRequestApprove(
+            { headers: { "x-gate-email": "operator@example.com" } },
+            res,
+            joinRequests,
+            liveParticipants,
+            pendingGrantDelivery,
+            "real-participant"
+          );
+
+          assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode}: ${res.body}`);
+          const body = JSON.parse(res.body);
+          assert.equal(body.channel, channel.toString("hex"));
+          assert.equal(joinRequests.size, 0, "approved request must leave the pending queue");
+
+          // Actually live, with a real cmd string pointing at the freshly minted grant.
+          assert.ok(liveParticipants.has("real-participant"));
+          const cmd = liveParticipants.get("real-participant").cmd;
+          assert.match(cmd, /CT_CHANNEL_ROLE=initiate/);
+          assert.match(cmd, /CT_CHANNEL_CALL_SERVICE=text_generation/);
+          assert.match(cmd, new RegExp(`CT_CHANNEL_HOLDER_KEY=${bridge.holder.priv.toString("hex")}`));
+
+          // The participant's own grant is waiting for their one-shot status poll.
+          assert.ok(pendingGrantDelivery.has("real-participant"));
+          const delivery = pendingGrantDelivery.get("real-participant");
+          assert.equal(delivery.channel, channel.toString("hex"));
+          assert.ok(typeof delivery.grantB === "string" && delivery.grantB.length > 0);
+
+          // The control plane actually got called for real: one channel registration, then one
+          // member call per side (not fabricated or skipped).
+          assert.equal(received.length, 3);
+          assert.equal(received[0].url, "/me/channels");
+          assert.equal(received[0].body.channel, channel.toString("hex"));
+          const memberCalls = received.slice(1);
+          const holders = memberCalls.map((c) => c.body.holder).sort();
+          assert.deepEqual(holders, [bridge.holder.pub.toString("hex"), participant.holder.pub.toString("hex")].sort());
+        }
+      );
+    } finally {
+      stub.close();
+    }
+  }
+);
