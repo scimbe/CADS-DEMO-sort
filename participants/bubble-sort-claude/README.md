@@ -77,8 +77,12 @@ second, orthogonal axis of comparison" above, not a harness defect.
 
 ## Running it yourself
 
+`generated/` is gitignored (it's build output, not source), so a fresh clone doesn't have
+`generated/handler.py` yet — run `./generate.sh` once first, or every round below will fault:
+
 ```bash
-./handler.sh --selftest    # checks generated/handler.py exists and emits a valid move; no LLM call
+./generate.sh               # writes generated/handler.py, only needed once per clone
+./handler.sh --selftest     # checks generated/handler.py exists and emits a valid move; no LLM call
 echo '{"round":1,"array":[5,3,8,1,9,2],"history":[],"budgetRemaining":19,"mode":"solo","you":"bubble-sort-claude"}' \
   | ./handler.sh            # runs the already-generated code; no LLM call
 ```
