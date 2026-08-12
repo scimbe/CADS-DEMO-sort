@@ -93,15 +93,15 @@ sessionForm.addEventListener("submit", async (ev) => {
   sessionStatusTextEl.textContent = "starting…";
   try {
     const info = await api("/api/channel-info");
-    if (!info.oidcIssuerBase) {
-      sessionStatusTextEl.textContent = "this deployment hasn't set SORT_OIDC_ISSUER_BASE -- see docs/operations.md";
-      return;
-    }
-    // This fetch call is the ONLY place the password is used -- it goes straight from this
-    // browser tab to Keycloak's own token endpoint, never through this bridge, never logged.
+    // This fetch call is the ONLY place the password is used. It POSTs to THIS origin
+    // (/api/oidc-proxy/token, same-origin -- no CORS involved at all), which Caddy transparently
+    // forwards to Keycloak's real token endpoint (see the Caddyfile's own comment on why: a
+    // direct browser->auth.bunsenbrenner.org fetch is blocked by Keycloak's own CORS policy for
+    // this origin). No application code -- not this bridge, not any script -- ever parses the
+    // password; Caddy only ever forwards opaque request/response bytes for this one route.
     // Standard OAuth Resource Owner Password Credentials grant, same request shape
     // mint-oidc-token.sh makes from a terminal -- just typed into a real form instead.
-    const tokenResp = await fetch(`${info.oidcIssuerBase.replace(/\/$/, "")}/protocol/openid-connect/token`, {
+    const tokenResp = await fetch("/api/oidc-proxy/token", {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded" },
       body: new URLSearchParams({

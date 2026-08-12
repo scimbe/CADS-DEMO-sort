@@ -92,6 +92,33 @@
 		}
 	}
 
+	# admin.html's login form (see admin.js) needs to POST a real OAuth password/refresh-token
+	# grant straight to Keycloak, but a same-origin browser fetch from sort.bunsenbrenner.org to
+	# auth.bunsenbrenner.org is blocked by CORS -- confirmed live (Keycloak's admin-cli client has
+	# no Web-Origins entry for this origin, unlike bunsenbrenner.org's own portal). Rather than
+	# routing the password through this bridge's own application code (which would recreate
+	# exactly the problem the client-side design exists to avoid -- see docs/operations.md),
+	# Caddy proxies the ONE fixed token-endpoint call: the browser stays same-origin (no CORS at
+	# all), and this hop only ever forwards opaque request/response bytes -- no server.js code,
+	# no logging, nothing here ever parses the body. Gated the same as the rest of the admin
+	# surface so an anonymous visitor can't use this bridge as an open relay against Keycloak.
+	@gated-oidc-proxy {
+		path /api/oidc-proxy/token
+	}
+	handle @gated-oidc-proxy {
+		route {
+			request_header -X-Gate-Email
+			forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+				uri /gate/check
+				copy_headers X-Gate-Email
+			}
+			rewrite * /realms/ct-demo/protocol/openid-connect/token
+			reverse_proxy https://auth.bunsenbrenner.org {
+				header_up Host auth.bunsenbrenner.org
+			}
+		}
+	}
+
 	# admin.html itself -- a separate handle block, not folded into @gated-api above, because
 	# its downstream action is file_server (a static file), not reverse_proxy: putting both a
 	# gate check and file_server in the SAME route{} keeps the required write-order guarantee
