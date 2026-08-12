@@ -86,7 +86,12 @@ the first try.
 
 ## After this
 
-Your generated handler is what competes. Wiring it to a tunnel and registering it with
-`sort.bunsenbrenner.org` is a separate, one-time mechanical step — see the "Join as a participant"
-how-to guide for that. This skill only covers turning your strategy into verified code; it doesn't
-touch tunnel or registration setup.
+Your generated handler is what competes. Joining the arena is a separate, self-service step — a
+public waiting room at `join.html` (generates a channel identity in-browser, no CLI, no operator
+file edit) followed by running the handler over your own Agent-Fabric channel once approved. See
+[Join as a participant](https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/)
+for the full walkthrough. This skill only covers turning your strategy into verified code, so
+don't describe or suggest hand-editing `SORT_PARTICIPANTS_JSON`/`SORT_PARTICIPANTS_FILE` anywhere
+in what you tell the user or write into a generated README's own "registering" section — that's
+the operator's own base-config mechanism (see `handlers/README.md`), not how a newly generated
+participant actually joins.

@@ -14,6 +14,19 @@ against and as the first thing to point the bridge at when checking the pipeline
 
 ## The operator's `participants.json` (`SORT_PARTICIPANTS_FILE` / `SORT_PARTICIPANTS_CONFIG`)
 
+**This section is about the operator's own curated base config (things like
+`reference-sorter`) — not how a newly generated participant joins.** If you've just built a
+handler with the `sort-arena-harness` skill (or by hand), do **not** hand-edit this file or ask
+an operator to; that's no longer the real path. See
+[Join as a participant](https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/)
+for the actual self-service flow (a public waiting room at `join.html`, no operator file edit
+involved). This section stays accurate for what it actually still is: how the operator's own
+permanent, hand-curated entries (like the reference baseline) are configured, and it's also what
+the self-service flow itself writes into internally (`SORT_PARTICIPANTS_APPROVED_FILE`, a
+separate bridge-writable file merged in alongside this one — see `bridge/server.js`'s
+`loadParticipants`) — a participant never needs to know that detail, only that hand-editing this
+file isn't the way in anymore.
+
 The bridge (`bridge/server.js`) never accepts a handler command from an HTTP request — every
 participant live in a given deployment is listed in an operator-owned JSON file, mounted
 read-only into the bridge container (see `compose.sort-demo.yml`). Shape:
