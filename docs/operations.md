@@ -67,16 +67,41 @@ elapses, `automateApproval()` starts failing with a real 502 from the control pl
 false-success) — `automationConfigured()` itself doesn't check token *validity*, only that one is
 *present*, so a pending Approve failing right after a window closes is expected, not a bug.
 
-## Known limitation: no long-lived credential yet
+## Known limitation: no long-lived credential yet — planned fix incoming
 
-This whole dance exists because the only credential wired up is a real human's password grant.
-The right fix is a Keycloak **service account** for this bridge (`client_credentials` grant,
-`service-account` roles scoped to exactly `POST /me/channels` and
-`/me/channels/:channel/members`, nothing else) — that would make `SORT_OIDC_TOKEN` a
-long-lived, non-human credential the bridge could refresh itself on a timer, closing this gap
-for good. That's a CADS-Tunnel-side change (realm/client configuration), not something
-`CADS-DEMO-sort` can add on its own — worth filing there if this keeps being a recurring
-friction point.
+This whole dance exists because the only credential wired up is a real human's password grant,
+and it's a CADS-Tunnel-side gap, not something `CADS-DEMO-sort` can fix on its own.
+
+**A real, concrete fix is planned on the CADS-Tunnel side and will very likely remove most of
+this file once it lands**: a portal-hosted `/portal/channels/:channel/claim` flow (announced
+2026-08-12, not live yet). A member submits their public holder key + noise key + attestation
+there (same `ct-agent channel member-material` data this repo's `join.html` already generates
+client-side and verifies today) and, on success, the portal itself displays a ready-to-run
+onboarding block — a real, server-issued `CT_CHANNEL_GRANT`, real broker/relay addresses, and
+Bash/PowerShell start-command tabs, with `CT_CHANNEL_HOLDER_KEY`/`_NOISE_KEY` left as clearly
+marked blanks (private keys never transit the server, same discipline this repo already follows).
+
+If/when that lands, it eliminates the entire premise of this document: the portal mints the
+grant itself using its own proper, non-human-password auth, so this bridge would no longer need
+to hold *any* control-plane credential (`SORT_OIDC_TOKEN`, the automation-session panel in
+`admin.html`, `docs/operations.md`'s whole "opening a testing window" dance — all of it goes
+away). `bridge/server.js`'s `mintGrants`/`cpFetch`/`automateApproval` and the vendored
+`grant/sort-channel-grant` binary would also become dead code to remove.
+
+**What's genuinely unclear until it's live, and blocks fully wiring this in now**: whether
+`/portal/channels/:channel/claim` has any concept of operator gating (only claimable against a
+channel id the operator pre-registered) or is open to anyone who can compute/knows the channel
+id. This repo's whole waiting-room design exists specifically so an operator reviews and approves
+*before* someone goes live (CADS-DEMO-sort#9) — if claim is unconditionally open, `join.html`/
+`admin.html` still need to exist as a review gate *in front of* the claim step, just without
+doing the grant-minting themselves anymore. If claim already requires an operator-created channel,
+the review gate could move earlier (approve first, hand back a claim link) instead. Don't guess
+at this — confirm the real shape once the mechanism is live before restructuring anything.
+
+**Do not implement against this early** — no endpoint exists yet to test against, and guessing at
+request/response shapes risks building something that has to be redone once the real API lands.
+This section exists so whoever picks this up (a future session, possibly this same one) has the
+full context immediately instead of rediscovering it.
 
 ## Redeploying after a code change
 
