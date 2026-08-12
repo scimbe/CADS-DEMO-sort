@@ -1,0 +1,36 @@
+{
+  "attestation_preimage_hex": "1600000063742d6132612d6e6f6973652d6174746573742d7631c9dd6728632c86b41e90221e283e2a147986a42ea7c79d052a8952a8cfd474f7d7c7e4c231d023690be567f4b60780a56ded1585c58e9df78678ea7bf96e0cd96531c293c15cdc04be9241147a0566a9eb1db0288f944f1c9ccd6d53a8bbcf8b",
+  "channel_id_for_link_a_b": "c9dd6728632c86b41e90221e283e2a147986a42ea7c79d052a8952a8cfd474f7",
+  "holder_a_pub": "d7c7e4c231d023690be567f4b60780a56ded1585c58e9df78678ea7bf96e0cd9",
+  "holder_b_pub": "0607a6203d723083dd92f8c7839edd3673e92914e67e4a13a6f09b4d2bd1da3c",
+  "negative_wrong_channel": {
+    "channel": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expect_valid": false,
+    "holder": "d7c7e4c231d023690be567f4b60780a56ded1585c58e9df78678ea7bf96e0cd9",
+    "noise_pubkey": "6531c293c15cdc04be9241147a0566a9eb1db0288f944f1c9ccd6d53a8bbcf8b",
+    "signature": "078ecf2bed3d42a8d0afa746b6128be852a5be555a4b58f0903eb89f70695f27caa28690cf6d2fb7197cc4c391cb8b409a9de9bd12587530cb47b01768709c02"
+  },
+  "negative_wrong_holder_signature": {
+    "channel": "c9dd6728632c86b41e90221e283e2a147986a42ea7c79d052a8952a8cfd474f7",
+    "expect_valid": false,
+    "holder": "d7c7e4c231d023690be567f4b60780a56ded1585c58e9df78678ea7bf96e0cd9",
+    "noise_pubkey": "6531c293c15cdc04be9241147a0566a9eb1db0288f944f1c9ccd6d53a8bbcf8b",
+    "signature": "ab08fac0391ec35cf12819ab6cdfacf33dc67ae30c7c2e7d7797ad95c05fba6f057df2af50f66943e7afe7005faa1f9e50f116fb563d4e6065816d6f96dceb04"
+  },
+  "negative_wrong_noise_key": {
+    "channel": "c9dd6728632c86b41e90221e283e2a147986a42ea7c79d052a8952a8cfd474f7",
+    "expect_valid": false,
+    "holder": "d7c7e4c231d023690be567f4b60780a56ded1585c58e9df78678ea7bf96e0cd9",
+    "noise_pubkey": "9dc71b8dbd612b49342c977da3773198da998005df2e817eae320035b41b98fa",
+    "signature": "078ecf2bed3d42a8d0afa746b6128be852a5be555a4b58f0903eb89f70695f27caa28690cf6d2fb7197cc4c391cb8b409a9de9bd12587530cb47b01768709c02"
+  },
+  "noise_a_pub": "6531c293c15cdc04be9241147a0566a9eb1db0288f944f1c9ccd6d53a8bbcf8b",
+  "operator_pub": "ca0215208b3f593f89e61ec508cb72f91bb59e271fba811ff26e7a066c8cba02",
+  "positive": {
+    "channel": "c9dd6728632c86b41e90221e283e2a147986a42ea7c79d052a8952a8cfd474f7",
+    "expect_valid": true,
+    "holder": "d7c7e4c231d023690be567f4b60780a56ded1585c58e9df78678ea7bf96e0cd9",
+    "noise_pubkey": "6531c293c15cdc04be9241147a0566a9eb1db0288f944f1c9ccd6d53a8bbcf8b",
+    "signature": "078ecf2bed3d42a8d0afa746b6128be852a5be555a4b58f0903eb89f70695f27caa28690cf6d2fb7197cc4c391cb8b409a9de9bd12587530cb47b01768709c02"
+  }
+}

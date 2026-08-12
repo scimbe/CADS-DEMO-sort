@@ -30,6 +30,19 @@ services:
       - SORT_PARTICIPANTS_FILE=/etc/sort-demo/participants.json
       - SORT_ROUND_TIMEOUT_MS=${SORT_ROUND_TIMEOUT_MS:-30000}
       - SORT_BUDGET=${SORT_BUDGET:-200}
+      # Waiting room (CADS-DEMO-sort#9 follow-up, Phase 1 -- see the plan). Unset
+      # SORT_ADMIN_EMAILS means every admin route fails closed (503); this is intentionally not
+      # a hard compose-level requirement (`:?`) the way SORT_PARTICIPANTS_CONFIG below is, since
+      # a deployment that doesn't want the waiting room at all should still start cleanly.
+      - SORT_ADMIN_EMAILS=${SORT_ADMIN_EMAILS:-}
+      - SORT_JOIN_REQUESTS_FILE=/var/lib/sort-demo/join-requests.json
+      - SORT_PARTICIPANTS_APPROVED_FILE=/var/lib/sort-demo/participants-approved.json
+      # This deployment's own Agent-Fabric channel identity, public halves only (see
+      # docs/onboarding.md / GET /api/channel-info) -- mint once with `ct-agent channel init`,
+      # keep the matching private keys wherever you run the manual grant step from (NOT in this
+      # container; Phase 1 never automates minting, see server.js's handleJoinRequestApprove).
+      - SORT_CHANNEL_OPERATOR_PUBKEY=${SORT_CHANNEL_OPERATOR_PUBKEY:-}
+      - SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY=${SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY:-}
     volumes:
       # Operator-owned participant config — which handler commands are live in this
       # deployment. Never derived from an HTTP request; see server.js's header comment.
@@ -38,6 +51,11 @@ services:
       # need to be reachable at whatever path participants.json's "cmd" fields point at.
       - ./participants:/opt/sort-demo/participants:ro
       - ./handlers:/opt/sort-demo/handlers:ro
+      # Deliberately writable (unlike every mount above) and deliberately its OWN named volume,
+      # not a path under the operator's own SORT_PARTICIPANTS_CONFIG tree -- the bridge writes
+      # here (join-requests.json, participants-approved.json) via the waiting-room admin flow;
+      # the operator's own curated base file above stays read-only and untouched either way.
+      - sort_demo_waiting_room:/var/lib/sort-demo
     # No `ports:` mapping — matches CADS-flappy-demo/CADS-cookbook-demo/CADS-a2a-demo's
     # own bridge services; only reachable via the Caddy origin below.
     restart: unless-stopped
@@ -47,9 +65,18 @@ services:
     build:
       context: .
       dockerfile: Caddy.Dockerfile
+    environment:
+      # Waiting room: the Browser-Plane login gate's own host, substituted into the Caddyfile's
+      # `forward_auth https://{$CT_GATE_UPSTREAM_HOST}` block gating the admin routes/admin.html.
+      # Same value CADS-webconference-demo's own gated Caddyfile uses for CT_GATE_UPSTREAM_HOST.
+      - CT_GATE_UPSTREAM_HOST=${CT_GATE_UPSTREAM_HOST:-bunsenbrenner.org}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - ./index.html:/srv/index.html:ro
+      - ./admin.html:/srv/admin.html:ro
+      - ./admin.js:/srv/admin.js:ro
+      - ./join.html:/srv/join.html:ro
+      - ./join.js:/srv/join.js:ro
       - ${SORT_CERT_DIR:?set SORT_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro
       - sort_demo_caddy_data:/data
     expose:
@@ -90,6 +117,7 @@ services:
 volumes:
   sort_demo_caddy_data:
   sort_demo_agent_state:
+  sort_demo_waiting_room:
 
 networks:
   default:

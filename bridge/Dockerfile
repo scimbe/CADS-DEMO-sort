@@ -5,7 +5,7 @@
 # SORT_PARTICIPANTS_FILE, whether that command itself dials ct-agent or not.
 FROM node:20-slim
 WORKDIR /app
-COPY server.js server.lib.js ./
+COPY server.js server.lib.js attestation.js ./
 # python3 is needed by handlers/reference-sorter.sh (the always-on baseline participant);
 # harmless to have present even for deployments that don't mount it.
 RUN apt-get update \

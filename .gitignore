@@ -1,2 +1,7 @@
 node_modules/
 participants/*/generated/
+
+# Waiting-room runtime state (SORT_JOIN_REQUESTS_FILE / SORT_PARTICIPANTS_APPROVED_FILE default
+# to these relative paths when unset -- real bridge-written data, never source, never committed).
+/join-requests.json
+/participants-approved.json

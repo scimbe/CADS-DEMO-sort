@@ -25,6 +25,81 @@
 	@api path /run/* /race /partition /participants /healthz
 	reverse_proxy @api sort-demo-bridge:8789
 
+	# Waiting room (CADS-DEMO-sort#9 follow-up): admin routes need a real, Caddy-verified
+	# operator identity; the bridge trusts X-Gate-Email absolutely (see server.js's
+	# gateVerifiedEmail/requireAdmin) because this is the ONLY place that header is ever set --
+	# request_header strips any client-supplied copy BEFORE forward_auth runs, so a smuggled
+	# header can never reach the bridge. Mirrors CADS-webconference-demo/Caddyfile's identical
+	# block verbatim, including its two hard-won gotchas:
+	#   1. route{} is required -- Caddyfile directives execute in Caddy's own implicit priority
+	#      order, not textual order, so without route{} the header-strip can run AFTER
+	#      forward_auth sets the real value, deleting a legitimate identity instead of just a
+	#      spoofed one (live-confirmed against the compiled JSON config upstream).
+	#   2. the public submit exemption below matches on METHOD + exact path, never a wildcard --
+	#      path matchers have no concept of HTTP method, so `path /api/join-requests*` would
+	#      also exempt the admin-only GET/approve/decline routes from the gate entirely.
+	@join-submit {
+		method POST
+		path /api/join-requests
+	}
+	@channel-info {
+		method GET
+		path /api/channel-info
+	}
+	handle @join-submit {
+		reverse_proxy sort-demo-bridge:8789
+	}
+	handle @channel-info {
+		reverse_proxy sort-demo-bridge:8789
+	}
+
+	# Admin-only API routes (list/approve/decline pending join requests, finish admitting a
+	# participant) -- gated, then proxied to the bridge, which re-checks X-Gate-Email against
+	# SORT_ADMIN_EMAILS itself regardless (never trust the gate alone -- see requireAdmin).
+	#
+	# Verified live against the real bunsenbrenner.org gate (local Docker test, 2026-08-12): the
+	# forward_auth call itself always goes out for real, but whether it actually blocks anyone is
+	# a separate, operator-configured toggle on the tunnel itself ("require login" in the portal)
+	# -- an unrecognized/ungated host's /gate/check answers 200 with no X-Gate-Email, same
+	# documented behavior as CADS-webconference-demo/Caddyfile. Confirmed the bridge's own
+	# requireAdmin still correctly 403s in that case (proven: even a client-forged X-Gate-Email
+	# header gets stripped before forward_auth runs and never reaches it) -- so the real security
+	# boundary is SORT_ADMIN_EMAILS either way, and this Caddy gate is defense-in-depth that only
+	# becomes fully effective once the operator turns "require login" on for this tunnel.
+	@gated-api {
+		path /api/join-requests /api/join-requests/* /api/participants/approved
+	}
+	handle @gated-api {
+		route {
+			request_header -X-Gate-Email
+			forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+				uri /gate/check
+				copy_headers X-Gate-Email
+			}
+			reverse_proxy sort-demo-bridge:8789
+		}
+	}
+
+	# admin.html itself -- a separate handle block, not folded into @gated-api above, because
+	# its downstream action is file_server (a static file), not reverse_proxy: putting both a
+	# gate check and file_server in the SAME route{} keeps the required write-order guarantee
+	# (see the reverse_proxy-vs-request_header ordering gotcha documented above) without a
+	# second gate check ever reaching the bridge for a plain static-file request.
+	@gated-admin-page {
+		path /admin.html
+	}
+	handle @gated-admin-page {
+		route {
+			request_header -X-Gate-Email
+			forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+				uri /gate/check
+				copy_headers X-Gate-Email
+			}
+			root * /srv
+			file_server
+		}
+	}
+
 	root * /srv
 	file_server
 }
