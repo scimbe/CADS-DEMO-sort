@@ -723,11 +723,18 @@ async function automateApproval(pending) {
     };
   }
 
+  // #106 :443 fallback, same optional treatment as everywhere else this pair appears --
+  // present only when this deployment has actually set it.
+  const frontDoorEnv =
+    process.env.SORT_CHANNEL_FRONT_DOOR && process.env.SORT_CHANNEL_FRONT_DOOR_CERT
+      ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${process.env.SORT_CHANNEL_FRONT_DOOR_CERT} `
+      : "";
   const cmd =
     `CT_CHANNEL_ROLE=initiate CT_CHANNEL_CALL_SERVICE=text_generation ` +
     `CT_CHANNEL_GRANT=${minted.grantA} ` +
     `CT_CHANNEL_HOLDER_KEY=${bridgeHolderPriv.toString("hex")} CT_CHANNEL_NOISE_KEY=${bridgeNoisePriv.toString("hex")} ` +
     `CT_CHANNEL_BROKER=${process.env.SORT_CHANNEL_BROKER} CT_CHANNEL_RELAY=${process.env.SORT_CHANNEL_RELAY} ` +
+    frontDoorEnv +
     `ct-agent channel`;
 
   return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB };
@@ -742,7 +749,14 @@ async function automateApproval(pending) {
  *  secret (every participant needs them to dial in after approval anyway, same values
  *  docs/onboarding.md tells a manual joiner to read from GET <cp-url>/network-info) -- exposed
  *  here too so join.js can hand back a fully filled-in serve command once approved, instead of
- *  making the participant cross-reference a separate doc for two host:port strings. */
+ *  making the participant cross-reference a separate doc for two host:port strings.
+ *  channelFrontDoor/channelFrontDoorCert are the CADS-Tunnel #106 `:443` TLS-TCP fallback for
+ *  participants whose network blocks the direct broker/relay ports (empirically: some corporate/
+ *  sandboxed networks pass ICMP and :4433 but filter :4435/:4436, per a real support case) --
+ *  same non-secret treatment as broker/relay (the cert is the edge's own TLS leaf, a public trust
+ *  anchor for the pinned TLS-TCP dial, not a private key). Both are optional/nullable: a
+ *  deployment that hasn't set SORT_CHANNEL_FRONT_DOOR simply omits the fallback, same as an
+ *  unconfigured broker/relay already does. */
 function handleChannelInfo(req, res) {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(
@@ -751,6 +765,8 @@ function handleChannelInfo(req, res) {
       bridgeHolderPubkey: process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY || null,
       channelBroker: process.env.SORT_CHANNEL_BROKER || null,
       channelRelay: process.env.SORT_CHANNEL_RELAY || null,
+      channelFrontDoor: process.env.SORT_CHANNEL_FRONT_DOOR || null,
+      channelFrontDoorCert: process.env.SORT_CHANNEL_FRONT_DOOR_CERT || null,
       // Not secret -- a realm base URL, same as CADS-Tunnel's own public agent-onboarding docs
       // already publish. admin.html's login form uses this to know where to POST the password
       // grant (see docs/operations.md); the password itself never reaches this bridge.

@@ -518,3 +518,45 @@ test(
     );
   }
 );
+
+test("GET /api/channel-info includes the #106 :443 fallback fields when configured, omits them when not", async () => {
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: "op-pub",
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: "bridge-holder-pub",
+      SORT_CHANNEL_BROKER: "test-edge:4435",
+      SORT_CHANNEL_RELAY: "test-edge:4436",
+      SORT_CHANNEL_FRONT_DOOR: "test-edge:443",
+      SORT_CHANNEL_FRONT_DOOR_CERT: "deadbeef",
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleChannelInfo } = require("./server.js");
+      const res = fakeRes();
+      handleChannelInfo({}, res);
+      const body = JSON.parse(res.body);
+      assert.equal(body.channelBroker, "test-edge:4435");
+      assert.equal(body.channelRelay, "test-edge:4436");
+      assert.equal(body.channelFrontDoor, "test-edge:443");
+      assert.equal(body.channelFrontDoorCert, "deadbeef");
+    }
+  );
+
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: "op-pub",
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: "bridge-holder-pub",
+      SORT_CHANNEL_BROKER: "test-edge:4435",
+      SORT_CHANNEL_RELAY: "test-edge:4436",
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleChannelInfo } = require("./server.js");
+      const res = fakeRes();
+      handleChannelInfo({}, res);
+      const body = JSON.parse(res.body);
+      assert.equal(body.channelFrontDoor, null, "unconfigured -> null, not a broken/empty string");
+      assert.equal(body.channelFrontDoorCert, null);
+    }
+  );
+});

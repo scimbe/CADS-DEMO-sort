@@ -66,6 +66,14 @@ services:
       # docs/onboarding.md's own Step 4 already documents for a manual join.
       - SORT_CHANNEL_BROKER=${SORT_CHANNEL_BROKER:-}
       - SORT_CHANNEL_RELAY=${SORT_CHANNEL_RELAY:-}
+      # CADS-Tunnel #106 :443 TLS-TCP fallback for participants whose network blocks the direct
+      # broker/relay ports above -- optional, both must be set together or neither applies (see
+      # handleChannelInfo's own comment in bridge/server.js). FRONT_DOOR is host:port (e.g.
+      # bunsenbrenner.org:443); FRONT_DOOR_CERT is the edge's own TLS leaf as hex DER (not a
+      # private key -- the pinned trust anchor for that TLS-TCP dial). Rotates with the edge's
+      # certificate (Let's Encrypt, ~90 days) -- refresh this value when it does.
+      - SORT_CHANNEL_FRONT_DOOR=${SORT_CHANNEL_FRONT_DOOR:-}
+      - SORT_CHANNEL_FRONT_DOOR_CERT=${SORT_CHANNEL_FRONT_DOOR_CERT:-}
     volumes:
       # Operator-owned participant config — which handler commands are live in this
       # deployment. Never derived from an HTTP request; see server.js's header comment.

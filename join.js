@@ -215,10 +215,20 @@ function renderApproved(channel, grant) {
   // no cross-referencing docs/onboarding.md for two host:port strings. CT_AGENT_SERVICE_HANDLER_CMD
   // is the one placeholder left: point it at your own verified handler.sh (docs/onboarding.md
   // Step 4 covers the full CT_AGENT_SERVICES=text_generation / role-tag distinction).
+  // #106 :443 fallback (for participants whose network blocks the direct broker/relay ports --
+  // a real support case: ICMP + :4433 passed, :4435/:4436 didn't) -- included only when this
+  // deployment has actually configured it (channelFrontDoor/channelFrontDoorCert both present),
+  // same "absent -> omitted" treatment as everywhere else in this flow.
+  const frontDoorLine =
+    channelInfo.channelFrontDoor && channelInfo.channelFrontDoorCert
+      ? `CT_CHANNEL_FRONT_DOOR=${channelInfo.channelFrontDoor} \\\n` +
+        `CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert} \\\n`
+      : "";
   pre.textContent =
     `CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \\\n` +
     `CT_CHANNEL_BROKER=${channelInfo.channelBroker || "<ask the operator>"} ` +
     `CT_CHANNEL_RELAY=${channelInfo.channelRelay || "<ask the operator>"} \\\n` +
+    frontDoorLine +
     `CT_CHANNEL_GRANT=${grant} \\\n` +
     `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv} \\\n` +
     `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv} \\\n` +
