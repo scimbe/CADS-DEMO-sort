@@ -88,14 +88,58 @@ failure, sharper spec, reliable code — is not a detour from the lesson. It *is
 transferable skill is diagnosing harness gaps from a real failure, not writing a good prompt on
 the first try.
 
+## Stage 2 (optional, the real lesson): evolve the harness toward a NAMED, checkable algorithm
+
+Once your v1 handler competes, the deeper exercise is steering the harness to a **specific,
+verifiable target** — not "it sorts" but "it IS bubble sort, provably." This is where tools and
+hooks enter, and where the spec-tightening loop from step 4 above becomes a real engineering
+workflow:
+
+1. **State the target as CHECKED properties, not vibes.** `dryrun.py` has them built in:
+   `--require-adjacent` (every move touches neighbours only, `j == i+1` — bubble sort's defining
+   constraint) and `--require-optimal-swaps` (total swaps == the start array's inversion count —
+   what a bubble sort that never swaps an ordered pair achieves exactly). Your goal line is:
+
+   ```
+   python3 dryrun.py participants/<id>/handler.sh --seed 42 --quiet \
+     --require-adjacent --require-optimal-swaps
+   ```
+
+   passing (exit 0) — and passing **twice on the same seed**, because reproducibility is part of
+   the target, not a nice-to-have.
+
+2. **Wire the goal line in as a hook, so regressions cannot slip past you.** Add it as a Claude
+   Code hook (a `PostToolUse` hook on Bash that runs the goal line whenever `generate.sh` ran, or
+   simply a `verify.sh` you invoke after every regeneration) — the point is that verification
+   happens *mechanically*, every time, not when you remember. This mirrors how the arena itself
+   treats verification: `handler.sh --selftest` and the bridge's own scoring are hooks you don't
+   get to skip.
+
+3. **Iterate `AGENTS.md`, not the generated code.** Run the goal line; every `property violation:`
+   line names exactly what your spec failed to pin down (a non-adjacent jump means your spec never
+   forbade direct placement; surplus swaps mean it lets the cursor swap already-ordered pairs or
+   lose its position and redo work). Tighten the spec — an explicit cursor-reconstruction rule, a
+   stated "only ever touch `k` and `k+1`", a termination rule read from the live array — and
+   regenerate. `participants/bubble-sort-claude/AGENTS.md` is the reference solution: consult it
+   AFTER your own attempt, as the worked answer, not as a copy source — deriving which spec line
+   kills which violation is the transferable skill.
+
+4. **Know when you're done.** Both property checks pass, on two different seeds, twice each. At
+   that point your harness doesn't just produce working code — it produces a *specific algorithm
+   on demand*, reproducibly, and you can explain which sentence in the spec guarantees which
+   property. That is a testably better harness, which was the point.
+
 ## After this
 
-Your generated handler is what competes. Joining the arena is a separate, self-service step — a
-public waiting room at `join.html` (generates a channel identity in-browser, no CLI, no operator
-file edit) followed by running the handler over your own Agent-Fabric channel once approved. See
+Your generated handler is what competes. Joining the arena is self-service at `join.html`: log in
+with your Keycloak account (the login IS the legitimization — reaching the join page already means
+you're authenticated), generate your channel identity in-browser, and submit; you are **approved
+automatically on the spot** (no waiting for an operator), the page hands you your grant and the
+exact serve command to run. See
 [Join as a participant](https://scimbe.github.io/CADS-DEMO-sort-docs/how-to/join-as-a-participant/)
-for the full walkthrough. This skill only covers turning your strategy into verified code, so
-don't describe or suggest hand-editing `SORT_PARTICIPANTS_JSON`/`SORT_PARTICIPANTS_FILE` anywhere
-in what you tell the user or write into a generated README's own "registering" section — that's
-the operator's own base-config mechanism (see `handlers/README.md`), not how a newly generated
-participant actually joins.
+for the full walkthrough. The operator can still revoke a participant later — approval is
+automatic, moderation is not gone. This skill only covers turning your strategy into verified
+code, so don't describe or suggest hand-editing
+`SORT_PARTICIPANTS_JSON`/`SORT_PARTICIPANTS_FILE` anywhere in what you tell the user or write
+into a generated README's own "registering" section — that's the operator's own base-config
+mechanism (see `handlers/README.md`), not how a newly generated participant actually joins.

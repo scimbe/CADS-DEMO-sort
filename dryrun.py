@@ -163,10 +163,36 @@ def run_round(handler, round_no, array, history, budget_remaining, mode, you, ti
     return {"fault": True, "reason": "exhausted retries"}  # unreachable in practice
 
 
-def run_solo(handler, initial_array, you, budget, timeout_s, quiet=False):
-    """Mirrors runSoloRun. Returns the same fields the bridge's own scoring reports."""
+def count_inversions(array):
+    """Pairs i<j with array[i] > array[j] -- the 'how far from sorted' measure, and the proven
+    lower bound on swaps for any adjacent-swap-only strategy (each adjacent swap fixes exactly
+    one inversion). Mirrors server.lib.js's countInversions."""
+    inv = 0
+    for i in range(len(array)):
+        for j in range(i + 1, len(array)):
+            if array[i] > array[j]:
+                inv += 1
+    return inv
+
+
+def run_solo(handler, initial_array, you, budget, timeout_s, quiet=False, property_checks=None):
+    """Mirrors runSoloRun. Returns the same fields the bridge's own scoring reports.
+
+    `property_checks` (tutorial stage 2, "evolve the harness toward a NAMED, verifiable
+    algorithm"): a set possibly containing "adjacent" and/or "optimal-swaps". These turn
+    algorithm-identity claims into CHECKED properties instead of vibes:
+      - "adjacent":       every emitted compare/swap must touch neighbours only (j == i+1) --
+                          the defining constraint of bubble sort (and its cousins).
+      - "optimal-swaps":  total swaps must equal the initial array's inversion count -- an
+                          adjacent-swap strategy that never swaps an already-ordered pair
+                          achieves exactly this (each swap fixes exactly one inversion), so
+                          exceeding it means wasted/undone work and a sub-bubble-sort harness.
+    Violations are collected (not raised) and reported in the result's `propertyViolations`."""
     if len(initial_array) > MAX_ARRAY_LEN:
         raise ValueError(f"array length {len(initial_array)} exceeds MAX_ARRAY_LEN ({MAX_ARRAY_LEN})")
+    property_checks = property_checks or set()
+    initial_inversions = count_inversions(initial_array)
+    property_violations = []
     array = list(initial_array)
     history = []
     comparisons = swaps = faults = wrong_done = 0
@@ -193,6 +219,11 @@ def run_solo(handler, initial_array, you, budget, timeout_s, quiet=False):
                 print(f"round {round_no}: done claimed but NOT sorted (fault-adjacent, not a format fault) {array}")
             continue
         move = outcome["move"]
+        if "adjacent" in property_checks and abs(move["j"] - move["i"]) != 1:
+            property_violations.append(
+                f"round {round_no}: {move['action']} {move['i']},{move['j']} touches a NON-adjacent pair "
+                f"(|j-i| = {abs(move['j'] - move['i'])}, must be 1)"
+            )
         if move["action"] == "compare":
             comparisons += 1
         else:
@@ -205,6 +236,13 @@ def run_solo(handler, initial_array, you, budget, timeout_s, quiet=False):
     if not finished_correctly and round_no >= budget and not quiet:
         print(f"budget exhausted, still {array}")
 
+    if "optimal-swaps" in property_checks and finished_correctly and swaps != initial_inversions:
+        property_violations.append(
+            f"swaps ({swaps}) != initial inversions ({initial_inversions}) -- an adjacent-swap "
+            f"strategy that never swaps an ordered pair uses exactly one swap per inversion; the "
+            f"surplus is wasted or undone work"
+        )
+
     return {
         "you": you,
         "finalArray": array,
@@ -215,6 +253,8 @@ def run_solo(handler, initial_array, you, budget, timeout_s, quiet=False):
         "wrongDone": wrong_done,
         "roundsUsed": round_no,
         "wallClockMs": round((time.time() - started) * 1000),
+        "initialInversions": initial_inversions,
+        "propertyViolations": property_violations,
     }
 
 
@@ -231,6 +271,19 @@ def main():
     ap.add_argument("--you", default="dryrun")
     ap.add_argument("--correction-check", action="store_true", help="probe whether the handler reacts to `correction`")
     ap.add_argument("--quiet", action="store_true", help="suppress per-round lines, print only the summary")
+    ap.add_argument(
+        "--require-adjacent",
+        action="store_true",
+        help="FAIL unless every compare/swap touches neighbours only (j == i+1) -- the defining "
+        "constraint of bubble sort; tutorial stage 2's first checked property",
+    )
+    ap.add_argument(
+        "--require-optimal-swaps",
+        action="store_true",
+        help="FAIL unless total swaps == the start array's inversion count -- what a bubble sort "
+        "that never swaps an ordered pair achieves exactly; combine with --require-adjacent and "
+        "--seed for a reproducible algorithm-identity check",
+    )
     args = ap.parse_args()
 
     if args.seed is not None:
@@ -263,15 +316,24 @@ def main():
         return 0
 
     array = [int(x) for x in args.array.split(",")] if args.array else [random.randint(0, 99) for _ in range(args.len)]
+    checks = set()
+    if args.require_adjacent:
+        checks.add("adjacent")
+    if args.require_optimal_swaps:
+        checks.add("optimal-swaps")
     print("start:", array)
-    result = run_solo(args.handler, array, args.you, args.budget, args.timeout, quiet=args.quiet)
+    result = run_solo(args.handler, array, args.you, args.budget, args.timeout, quiet=args.quiet, property_checks=checks)
     print(
         f"rounds={result['roundsUsed']} comparisons={result['comparisons']} swaps={result['swaps']} "
         f"faults={result['faults']} wrongDone={result['wrongDone']} sorted={result['finishedCorrectly']} "
-        f"wallClockMs={result['wallClockMs']}"
+        f"inversions={result['initialInversions']} wallClockMs={result['wallClockMs']}"
     )
     print("final:", result["finalArray"])
-    return 0 if (result["finishedCorrectly"] and result["faults"] == 0) else 1
+    for violation in result["propertyViolations"]:
+        print(f"property violation: {violation}")
+    if checks and not result["propertyViolations"] and result["finishedCorrectly"]:
+        print(f"property checks passed: {', '.join(sorted(checks))}")
+    return 0 if (result["finishedCorrectly"] and result["faults"] == 0 and not result["propertyViolations"]) else 1
 
 
 if __name__ == "__main__":
