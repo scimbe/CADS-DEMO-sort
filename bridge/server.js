@@ -844,7 +844,10 @@ async function automateApproval(pending) {
   // coupled to the front-door pair being present: v0.4.8 refuses FRONT_DOOR_ONLY at parse time
   // without CT_CHANNEL_FRONT_DOOR(+_CERT), so emitting it with a null cert would crash the
   // command exactly like the incident did.
-  const liveCert = await edgeCertHex();
+  // Skip the /pki/ca round-trip entirely when this deployment hasn't configured a front door at
+  // all -- no point fetching a cert nothing will use, and it keeps automateApproval's real
+  // control-plane call count matching what a given deployment's config actually needs.
+  const liveCert = process.env.SORT_CHANNEL_FRONT_DOOR ? await edgeCertHex() : null;
   const frontDoorEnv =
     process.env.SORT_CHANNEL_FRONT_DOOR && liveCert
       ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${liveCert} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
