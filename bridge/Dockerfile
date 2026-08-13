@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # CT_AGENT_REF pins a real tag, not `main`, so this image doesn't silently pick up an unreleased
 # breaking change -- bump this deliberately when a new ct-agent release is worth pulling in.
 FROM rust:1-slim-bookworm AS ct-agent-builder
-ARG CT_AGENT_REF=v0.4.4
+ARG CT_AGENT_REF=v0.4.6
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev cmake protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
