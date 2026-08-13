@@ -574,6 +574,12 @@ async function handleRun(req, res, participants, participantId, query) {
       comparisons: result.comparisons,
       swaps: result.swaps,
       faults: result.faults,
+      // ALWAYS explicit, even at 0 (tester finding, #9 retest 6): for a SCORED metric the
+      // explicit zero is the statement ("zero transport faults"), and a client cannot tell a
+      // conditionally-omitted field from "this deployment predates the feature" -- which broke
+      // exactly the regression measurement the field exists for. ?? 0 keeps the event stable
+      // even if an older lib result ever lacks the counter.
+      transportFaults: result.transportFaults ?? 0,
       roundsUsed: result.roundsUsed,
       wallClockMs: result.wallClockMs,
       inversionsOverTime: result.inversionsOverTime,
