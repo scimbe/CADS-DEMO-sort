@@ -412,7 +412,7 @@ async function handleRun(req, res, participants, participantId, query) {
       you: config.you,
       initialArray,
       budget: resolveBudget(query),
-      callHandler: (input) => callHandlerProcess(config.cmd, input),
+      callHandler: async (input) => callHandlerProcess(await freshenedCmd(config.cmd), input),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
     sendNdjson(res, {
@@ -456,7 +456,7 @@ async function handleRace(req, res, participants, ids, query) {
 
   try {
     const result = await runRaceSession({
-      participants: chosen.map((c) => ({ you: c.you, callHandler: (input) => callHandlerProcess(c.cmd, input) })),
+      participants: chosen.map((c) => ({ you: c.you, callHandler: async (input) => callHandlerProcess(await freshenedCmd(c.cmd), input) })),
       initialArray,
       budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
@@ -488,7 +488,7 @@ async function handlePartition(req, res, participants, ids, query) {
 
   try {
     const segments = []; // filled in below, but participants need to know their own segment before the first round event
-    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: (input) => callHandlerProcess(c.cmd, input) }));
+    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: async (input) => callHandlerProcess(await freshenedCmd(c.cmd), input) }));
     // Compute segment boundaries the same way runPartitionSession will, purely so the "start"
     // event can tell the browser where each participant's slice sits before any rounds arrive.
     const base = Math.floor(initialArray.length / chosen.length);
@@ -766,6 +766,27 @@ async function relayGateAddr() {
     // CP unreachable -- omit the relay gate rather than serve a guess.
   }
   return null;
+}
+
+/** Re-inject the CURRENT front-door transport env into a stored role command (#9 retest 2,
+ *  2026-08-13): approved participants persist their `cmd` string as built AT APPROVAL TIME --
+ *  including whatever CT_CHANNEL_FRONT_DOOR_CERT was current (or, in the incident, corrupted)
+ *  back then. Fixing the construction site alone therefore healed only FUTURE approvals; every
+ *  existing participant (the tester's insertion-fan-048 among them) kept faulting 600/600 with
+ *  `must be hex DER` because each round re-ran the stale stored string. Baked-in volatile values
+ *  can also never survive a CA reissue. So: strip any front-door tokens the stored cmd carries
+ *  and prepend today's validated ones at CALL time -- old participants heal without
+ *  re-approval, and a future CA rotation is picked up within the cert cache TTL. */
+async function freshenedCmd(storedCmd) {
+  const stripped = storedCmd.replace(/CT_CHANNEL_FRONT_DOOR(?:_CERT|_ONLY)?=\S+\s+/g, "");
+  const liveCert = await edgeCertHex();
+  const frontDoorEnv =
+    process.env.SORT_CHANNEL_FRONT_DOOR && liveCert
+      ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${liveCert} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
+      : "";
+  // Shell env-assignment prefixes are position-independent as long as they precede the command
+  // word, so prepending is safe regardless of where the stripped tokens sat.
+  return frontDoorEnv + stripped;
 }
 
 async function cpFetch(path, body) {

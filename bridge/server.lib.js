@@ -126,7 +126,16 @@ async function runRound({ callHandler, round, array, history, budgetRemaining, m
     } catch (e) {
       // Spawn failure, timeout, non-zero exit — callHandler's contract is to reject with a
       // message, never to throw something we can't stringify.
-      correction = `your last reply could not be read (${e.message || e}) — reply with exactly one JSON object`;
+      //
+      // #9 retest 2: name the failing SIDE. A `role command exited …` rejection means the
+      // BRIDGE's own ct-agent invocation died before any request ever reached the participant
+      // — wording it as "your last reply could not be read" sent a participant with a
+      // perfectly healthy handler off to debug their own side for hours (their words). Only a
+      // genuine read/exchange failure keeps the old participant-facing wording.
+      const bridgeSide = /role command exited/.test(String(e.message || e));
+      correction = bridgeSide
+        ? `the arena's own role command failed before your handler was ever called (${e.message || e}) — this is a bridge-side fault, nothing to fix on your side`
+        : `your last reply could not be read (${e.message || e}) — reply with exactly one JSON object`;
       if (attempts >= maxAttempts) {
         return { round, fault: true, reason: correction, array, applied: false };
       }
