@@ -132,12 +132,18 @@ async function runRound({ callHandler, round, array, history, budgetRemaining, m
       // — wording it as "your last reply could not be read" sent a participant with a
       // perfectly healthy handler off to debug their own side for hours (their words). Only a
       // genuine read/exchange failure keeps the old participant-facing wording.
-      const bridgeSide = /role command exited/.test(String(e.message || e));
+      const bridgeSide = /role command exited|persistent role command failed|role command timed out/.test(
+        String(e.message || e)
+      );
       correction = bridgeSide
         ? `the arena's own role command failed before your handler was ever called (${e.message || e}) — this is a bridge-side fault, nothing to fix on your side`
         : `your last reply could not be read (${e.message || e}) — reply with exactly one JSON object`;
       if (attempts >= maxAttempts) {
-        return { round, fault: true, reason: correction, array, applied: false };
+        // Tag the SIDE on the returned outcome, not just in the text (#9 retest 5 / tester
+        // finding): `faults` is a SCORED metric and the demo exists to compare harnesses —
+        // booking transport failures against the participant made a worse network read as a
+        // worse harness. Callers count `transport: true` faults separately.
+        return { round, fault: true, transport: bridgeSide, reason: correction, array, applied: false };
       }
       continue;
     }
@@ -175,6 +181,7 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
   let comparisons = 0;
   let swaps = 0;
   let faults = 0;
+  let transportFaults = 0;
   let finishedCorrectly = false;
   let round = 0;
   const startedAt = Date.now();
@@ -203,8 +210,18 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
     const callMs = Date.now() - before;
 
     if (outcome.fault) {
-      faults++;
-      record({ round, action: "fault", reason: outcome.reason, callMs });
+      // Transport (bridge-side) faults are accounted SEPARATELY from participant faults
+      // (#9 retest 5): they still consume a round of budget (the run stays bounded), but they
+      // never count against the participant's scored `faults` — a harness comparison must not
+      // reward whoever has the better network. The round event carries `transport: true` so
+      // the UI can render them distinctly.
+      if (outcome.transport) {
+        transportFaults++;
+        record({ round, action: "fault", transport: true, reason: outcome.reason, callMs });
+      } else {
+        faults++;
+        record({ round, action: "fault", reason: outcome.reason, callMs });
+      }
       continue; // array unchanged, budget still spent — per docs/protocol.md
     }
     if (outcome.done) {
@@ -235,6 +252,7 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
     comparisons,
     swaps,
     faults,
+    transportFaults,
     roundsUsed: round,
     wallClockMs: Date.now() - startedAt,
     inversionsOverTime,
