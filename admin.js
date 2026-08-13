@@ -207,8 +207,37 @@ function updateCount() {
 // interval polling shape as CADS-webconference-demo's own admin-facing lists (its incoming-call
 // poll). 5s: fast enough to feel live for a low-traffic admin panel, not aggressive enough to
 // matter at this scale.
+//
+// Backoff on persistent failure (2026-08-13, found during a live incident): an admin tab left
+// open after the operator session expired kept polling every 5s with a dead token --
+// indefinitely, from three call sites, for hours (measured: 157 failed requests over 3h45m from
+// one forgotten tab). A failing poll can never succeed again without operator action, so
+// repeated failures now stretch the interval exponentially (5s -> 10s -> 20s ... capped at
+// 5 min) and any success snaps it back to 5s. Scheduled via chained setTimeout rather than
+// setInterval so the delay can actually vary.
 const POLL_INTERVAL_MS = 5000;
-setInterval(refresh, POLL_INTERVAL_MS);
+const POLL_BACKOFF_CAP_MS = 300_000;
+let pollFailures = 0;
+async function pollLoop() {
+  let failed = false;
+  try {
+    failed = (await refresh()) === false ? false : failed; // refresh() may not report; see below
+  } catch {
+    failed = true;
+  }
+  // refresh() swallows per-request errors internally; detect a dead session cheaply by probing
+  // the same endpoint api() would hit. A non-OK means every panel fetch is failing too.
+  try {
+    const probe = await fetch("/api/admin/join-requests", { method: "HEAD" });
+    failed = failed || !probe.ok;
+  } catch {
+    failed = true;
+  }
+  pollFailures = failed ? pollFailures + 1 : 0;
+  const delay = Math.min(POLL_INTERVAL_MS * 2 ** pollFailures, POLL_BACKOFF_CAP_MS);
+  setTimeout(pollLoop, delay);
+}
+setTimeout(pollLoop, POLL_INTERVAL_MS);
 
 function renderRow(req) {
   const li = document.createElement("li");
