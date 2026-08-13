@@ -752,9 +752,20 @@ async function automateApproval(pending) {
 
   // #106 :443 fallback, same optional treatment as everywhere else this pair appears --
   // present only when this deployment has actually set it.
+  //
+  // CT_CHANNEL_FRONT_DOOR_ONLY=1 (new in ct-agent v0.4.8): the edge runs the :443 front-door
+  // pairer and the QUIC/relay pairer (:4436) as SEPARATE instances, so two members only pair
+  // if they park in the SAME one. This host's own UDP/QUIC is confirmed permanently blocked
+  // (13/13 port-scan failures), so the dial ladder here always lands on :443 -- but a
+  // participant whose own UDP works would otherwise land in the QUIC pairer instead, and both
+  // sides would park in different pairers, find no partner, and get reaped after the 30s TTL
+  // (surfaces client-side as "edge broker refused the channel join" ~32-41s in, not an obvious
+  // timeout). Forcing FRONT_DOOR_ONLY=1 here makes the bridge's own half deterministic
+  // regardless of the participant's transport; join.js's own accept-side command needs the same
+  // flag set for pairing to actually succeed until the edge ships transport-unified pairing.
   const frontDoorEnv =
     process.env.SORT_CHANNEL_FRONT_DOOR && process.env.SORT_CHANNEL_FRONT_DOOR_CERT
-      ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${process.env.SORT_CHANNEL_FRONT_DOOR_CERT} `
+      ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${process.env.SORT_CHANNEL_FRONT_DOOR_CERT} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
       : "";
   // CT_CHANNEL_RELAY_ONLY=1: the bridge only ever DIALS OUT to a participant (initiate role) --
   // it's never dialed back, so it has no dialable address of its own and needs none. Without

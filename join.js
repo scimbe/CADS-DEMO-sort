@@ -219,10 +219,18 @@ function renderApproved(channel, grant) {
   // a real support case: ICMP + :4433 passed, :4435/:4436 didn't) -- included only when this
   // deployment has actually configured it (channelFrontDoor/channelFrontDoorCert both present),
   // same "absent -> omitted" treatment as everywhere else in this flow.
+  // CT_CHANNEL_FRONT_DOOR_ONLY=1 (ct-agent v0.4.8+): the edge's :443 front-door pairer and its
+  // QUIC/relay pairer (:4436) are separate instances -- two members only pair if they park in
+  // the SAME one. The bridge's own half always lands on :443 (its host's UDP is permanently
+  // blocked), so without this flag a participant whose own UDP happens to work would park in
+  // the QUIC pairer instead, find no partner, and get reaped after 30s (looks like "edge broker
+  // refused the channel join" ~32-41s in, not an obvious timeout). Forcing it here keeps this
+  // side deterministic until the edge ships transport-unified pairing.
   const frontDoorLine =
     channelInfo.channelFrontDoor && channelInfo.channelFrontDoorCert
       ? `CT_CHANNEL_FRONT_DOOR=${channelInfo.channelFrontDoor} \\\n` +
-        `CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert} \\\n`
+        `CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert} \\\n` +
+        `CT_CHANNEL_FRONT_DOOR_ONLY=1 \\\n`
       : "";
   pre.textContent =
     `CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \\\n` +
