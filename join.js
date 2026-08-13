@@ -232,11 +232,22 @@ function renderApproved(channel, grant) {
         `CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert} \\\n` +
         `CT_CHANNEL_FRONT_DOOR_ONLY=1 \\\n`
       : "";
+  // #330 relay gate: the :443-multiplexed gated relay a NAT-only participant needs IN ADDITION
+  // to broker/relay -- deliberately a separate protocol from CT_CHANNEL_RELAY, and omitting it
+  // fails silently for exactly the networks that need it most (measured on this deployment:
+  // 0 sessions in 90s without it vs 3 stable sessions with it, same v0.4.8 + grant). Included
+  // whenever the deployment publishes it, same "absent -> omitted" treatment as the front door.
+  const relayGateLine =
+    channelInfo.channelRelayGate && channelInfo.channelRelayGateCert
+      ? `CT_CHANNEL_RELAY_GATE=${channelInfo.channelRelayGate} \\\n` +
+        `CT_CHANNEL_RELAY_GATE_CERT=${channelInfo.channelRelayGateCert} \\\n`
+      : "";
   pre.textContent =
     `CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \\\n` +
     `CT_CHANNEL_BROKER=${channelInfo.channelBroker || "<ask the operator>"} ` +
     `CT_CHANNEL_RELAY=${channelInfo.channelRelay || "<ask the operator>"} \\\n` +
     frontDoorLine +
+    relayGateLine +
     `CT_CHANNEL_GRANT=${grant} \\\n` +
     `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv} \\\n` +
     `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv} \\\n` +

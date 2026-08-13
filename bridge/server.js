@@ -695,6 +695,79 @@ function mintGrants(holderAHex, holderBHex) {
  *  refreshing whenever it expires (a realm's default is typically minutes, not hours) -- until a
  *  service-account credential is wired in, that's a real operational limitation of Phase 2 worth
  *  documenting, not hiding. */
+/** Is `s` a decodable hex-DER string (non-empty, even length, hex chars only)? The gate every
+ *  outbound trust-anchor value must pass -- see edgeCertHex() for the incident that makes this
+ *  non-negotiable. */
+function validHexDer(s) {
+  return typeof s === "string" && s.length > 0 && s.length % 2 === 0 && /^[0-9a-fA-F]+$/.test(s);
+}
+
+/** The edge trust-anchor cert as hex DER, fetched LIVE from the control plane's GET /pki/ca
+ *  (cached 5 min), env fallback only if it validates.
+ *
+ *  Incident, 2026-08-13 (#9 retest): SORT_CHANNEL_FRONT_DOOR_CERT -- a hand-copied deploy-time
+ *  env constant -- served an ODD-length (undecodable) hex string that was ALSO a stale cert:
+ *  the edge CA was reissued at 15:24 UTC and the env value still carried the Aug-12 cert,
+ *  corrupted by 3 dropped characters somewhere in the copy. Every participant following
+ *  join.html AND the bridge's own role command (same env var) died instantly with
+ *  `CT_CHANNEL_FRONT_DOOR_CERT must be hex DER` -- measured as 600/600 arena rounds faulting at
+ *  ~90ms. A hand-copied cert constant can never survive a CA reissue; the CP's /pki/ca is the
+ *  single source of truth (ct-agent's own docs point CT_CHANNEL_RELAY_GATE_CERT at the same
+ *  endpoint), so serve THAT. The response is accepted as hex text or raw DER bytes (hex-encoded
+ *  here); anything that fails validHexDer is never served -- better to omit the fallback rungs
+ *  than to hand out a value that crashes every consumer. */
+let cachedEdgeCert = { hex: null, fetchedAt: 0 };
+const EDGE_CERT_TTL_MS = 5 * 60 * 1000;
+async function edgeCertHex() {
+  const now = Date.now();
+  if (cachedEdgeCert.hex && now - cachedEdgeCert.fetchedAt < EDGE_CERT_TTL_MS) return cachedEdgeCert.hex;
+  try {
+    const resp = await fetch(`${process.env.SORT_CP_URL}/pki/ca`);
+    if (resp.ok) {
+      const buf = Buffer.from(await resp.arrayBuffer());
+      const asText = buf.toString("utf8").trim();
+      const hex = validHexDer(asText) ? asText.toLowerCase() : buf.toString("hex");
+      if (validHexDer(hex)) {
+        cachedEdgeCert = { hex, fetchedAt: now };
+        return hex;
+      }
+    }
+  } catch {
+    // CP unreachable -- fall through to the env fallback below.
+  }
+  const env = process.env.SORT_CHANNEL_FRONT_DOOR_CERT;
+  return validHexDer(env) ? env.toLowerCase() : null;
+}
+
+/** The edge's #330 relay-gate host:port (the `:443`-multiplexed gated Circuit-Relay v2 path a
+ *  NAT'd participant needs -- CT_CHANNEL_RELAY_GATE is deliberately NOT interchangeable with
+ *  CT_CHANNEL_RELAY, and omitting it fails silently). Env override SORT_CHANNEL_RELAY_GATE
+ *  first; otherwise derived from the CP's GET /network-info `channel_relay_gate_port` + the
+ *  front-door/broker host (cached 5 min). Measured impact of publishing this (same v0.4.8, same
+ *  grant, 90-100s window): 0 sessions without it vs 3 stable sessions with it. */
+let cachedRelayGate = { addr: null, fetchedAt: 0 };
+async function relayGateAddr() {
+  if (process.env.SORT_CHANNEL_RELAY_GATE) return process.env.SORT_CHANNEL_RELAY_GATE;
+  const now = Date.now();
+  if (cachedRelayGate.addr && now - cachedRelayGate.fetchedAt < EDGE_CERT_TTL_MS) return cachedRelayGate.addr;
+  try {
+    const resp = await fetch(`${process.env.SORT_CP_URL}/network-info`);
+    if (resp.ok) {
+      const info = await resp.json();
+      const port = info && info.channel_relay_gate_port;
+      const hostSource = process.env.SORT_CHANNEL_FRONT_DOOR || process.env.SORT_CHANNEL_BROKER || "";
+      const host = hostSource.includes(":") ? hostSource.slice(0, hostSource.lastIndexOf(":")) : hostSource;
+      if (port && host) {
+        cachedRelayGate = { addr: `${host}:${port}`, fetchedAt: now };
+        return cachedRelayGate.addr;
+      }
+    }
+  } catch {
+    // CP unreachable -- omit the relay gate rather than serve a guess.
+  }
+  return null;
+}
+
 async function cpFetch(path, body) {
   const token = currentOidcToken();
   const resp = await fetch(`${process.env.SORT_CP_URL}${path}`, {
@@ -751,21 +824,30 @@ async function automateApproval(pending) {
   }
 
   // #106 :443 fallback, same optional treatment as everywhere else this pair appears --
-  // present only when this deployment has actually set it.
+  // present only when this deployment has actually set the front door.
+  //
+  // The CERT comes from edgeCertHex() (live /pki/ca, validated), NOT the raw env var: the
+  // bridge's own role command died on the corrupted/stale env value exactly like every
+  // participant did (see edgeCertHex's incident comment) -- 600/600 rounds faulting with
+  // `CT_CHANNEL_FRONT_DOOR_CERT must be hex DER`.
   //
   // CT_CHANNEL_FRONT_DOOR_ONLY=1 (new in ct-agent v0.4.8): the edge runs the :443 front-door
-  // pairer and the QUIC/relay pairer (:4436) as SEPARATE instances, so two members only pair
-  // if they park in the SAME one. This host's own UDP/QUIC is confirmed permanently blocked
-  // (13/13 port-scan failures), so the dial ladder here always lands on :443 -- but a
-  // participant whose own UDP works would otherwise land in the QUIC pairer instead, and both
-  // sides would park in different pairers, find no partner, and get reaped after the 30s TTL
-  // (surfaces client-side as "edge broker refused the channel join" ~32-41s in, not an obvious
-  // timeout). Forcing FRONT_DOOR_ONLY=1 here makes the bridge's own half deterministic
-  // regardless of the participant's transport; join.js's own accept-side command needs the same
-  // flag set for pairing to actually succeed until the edge ships transport-unified pairing.
+  // pairer and the QUIC/relay pairer (:4436) as SEPARATE instances (CADS-Tunnel#495), so two
+  // members only pair if they park in the SAME one. This host's own UDP/QUIC is confirmed
+  // permanently blocked (13/13 port-scan failures), so the dial ladder here always lands on
+  // :443 -- but a participant whose own UDP works would otherwise land in the QUIC pairer
+  // instead, and both sides would park in different pairers, find no partner, and get reaped
+  // after the 30s TTL (surfaces client-side as "edge broker refused the channel join" ~32-41s
+  // in, not an obvious timeout). Forcing FRONT_DOOR_ONLY=1 here makes the bridge's own half
+  // deterministic regardless of the participant's transport; join.js's own accept-side command
+  // sets the same flag, until the edge ships transport-unified pairing (#495). The flag stays
+  // coupled to the front-door pair being present: v0.4.8 refuses FRONT_DOOR_ONLY at parse time
+  // without CT_CHANNEL_FRONT_DOOR(+_CERT), so emitting it with a null cert would crash the
+  // command exactly like the incident did.
+  const liveCert = await edgeCertHex();
   const frontDoorEnv =
-    process.env.SORT_CHANNEL_FRONT_DOOR && process.env.SORT_CHANNEL_FRONT_DOOR_CERT
-      ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${process.env.SORT_CHANNEL_FRONT_DOOR_CERT} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
+    process.env.SORT_CHANNEL_FRONT_DOOR && liveCert
+      ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${liveCert} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
       : "";
   // CT_CHANNEL_RELAY_ONLY=1: the bridge only ever DIALS OUT to a participant (initiate role) --
   // it's never dialed back, so it has no dialable address of its own and needs none. Without
@@ -803,7 +885,12 @@ async function automateApproval(pending) {
  *  anchor for the pinned TLS-TCP dial, not a private key). Both are optional/nullable: a
  *  deployment that hasn't set SORT_CHANNEL_FRONT_DOOR simply omits the fallback, same as an
  *  unconfigured broker/relay already does. */
-function handleChannelInfo(req, res) {
+async function handleChannelInfo(req, res) {
+  // Live-validated trust anchor + relay gate (see edgeCertHex/relayGateAddr): a corrupted or
+  // stale cert is never served (null omits the fallback instead of crashing every consumer),
+  // and the #330 relay gate every NAT'd participant needs is finally published here too.
+  const cert = await edgeCertHex();
+  const relayGate = await relayGateAddr();
   res.writeHead(200, { "content-type": "application/json" });
   res.end(
     JSON.stringify({
@@ -812,7 +899,12 @@ function handleChannelInfo(req, res) {
       channelBroker: process.env.SORT_CHANNEL_BROKER || null,
       channelRelay: process.env.SORT_CHANNEL_RELAY || null,
       channelFrontDoor: process.env.SORT_CHANNEL_FRONT_DOOR || null,
-      channelFrontDoorCert: process.env.SORT_CHANNEL_FRONT_DOOR_CERT || null,
+      channelFrontDoorCert: cert,
+      // #330: the :443-multiplexed gated relay a NAT-only participant MUST use in addition to
+      // broker/relay (not interchangeable with channelRelay; omitting it fails silently). The
+      // cert is the same /pki/ca trust anchor as the front door's.
+      channelRelayGate: relayGate,
+      channelRelayGateCert: relayGate ? cert : null,
       // Not secret -- a realm base URL, same as CADS-Tunnel's own public agent-onboarding docs
       // already publish. admin.html's login form uses this to know where to POST the password
       // grant (see docs/operations.md); the password itself never reaches this bridge.

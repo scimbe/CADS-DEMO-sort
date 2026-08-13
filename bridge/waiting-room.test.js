@@ -579,6 +579,9 @@ test(
 );
 
 test("GET /api/channel-info includes the #106 :443 fallback fields when configured, omits them when not", async () => {
+  // NOTE (2026-08-13 incident): the handler is now async and the cert is live-fetched from the
+  // CP's /pki/ca with the env var as a validated fallback -- in this test env SORT_CP_URL is
+  // unset, so the fetch fails and the (valid-hex) env fallback is what gets served.
   await withEnv(
     {
       SORT_CHANNEL_OPERATOR_PUBKEY: "op-pub",
@@ -592,7 +595,7 @@ test("GET /api/channel-info includes the #106 :443 fallback fields when configur
       delete require.cache[require.resolve("./server.js")];
       const { handleChannelInfo } = require("./server.js");
       const res = fakeRes();
-      handleChannelInfo({}, res);
+      await handleChannelInfo({}, res);
       const body = JSON.parse(res.body);
       assert.equal(body.channelBroker, "test-edge:4435");
       assert.equal(body.channelRelay, "test-edge:4436");
@@ -612,10 +615,40 @@ test("GET /api/channel-info includes the #106 :443 fallback fields when configur
       delete require.cache[require.resolve("./server.js")];
       const { handleChannelInfo } = require("./server.js");
       const res = fakeRes();
-      handleChannelInfo({}, res);
+      await handleChannelInfo({}, res);
       const body = JSON.parse(res.body);
       assert.equal(body.channelFrontDoor, null, "unconfigured -> null, not a broken/empty string");
       assert.equal(body.channelFrontDoorCert, null);
+    }
+  );
+});
+
+test("GET /api/channel-info never serves an undecodable (odd-length/non-hex) cert -- the 2026-08-13 incident", async () => {
+  // The real outage: a hand-copied env cert was odd-length (3 chars dropped) AND stale after a
+  // CA reissue. Every consumer -- join.html participants and the bridge's own role command --
+  // died with `CT_CHANNEL_FRONT_DOOR_CERT must be hex DER` (600/600 arena rounds faulted).
+  // Contract: a value that fails the hex-DER parity/charset check is NEVER served; the field is
+  // null (participants simply lose the optional fallback rung) instead of crashing everyone.
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: "op-pub",
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: "bridge-holder-pub",
+      SORT_CHANNEL_BROKER: "test-edge:4435",
+      SORT_CHANNEL_RELAY: "test-edge:4436",
+      SORT_CHANNEL_FRONT_DOOR: "test-edge:443",
+      SORT_CHANNEL_FRONT_DOOR_CERT: "abcde", // odd length -- undecodable, like the live incident
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleChannelInfo } = require("./server.js");
+      const res = fakeRes();
+      await handleChannelInfo({}, res);
+      const body = JSON.parse(res.body);
+      assert.equal(
+        body.channelFrontDoorCert,
+        null,
+        "an undecodable cert must be withheld, not served to crash every consumer"
+      );
     }
   );
 });
