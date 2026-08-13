@@ -59,9 +59,23 @@ COPY --from=grant-builder /tmp/sort-channel-grant /usr/local/bin/sort-channel-gr
 COPY --from=ct-agent-builder /tmp/ct-agent /usr/local/bin/ct-agent
 # python3 is needed by handlers/reference-sorter.sh (the always-on baseline participant);
 # harmless to have present even for deployments that don't mount it.
+#
+# tini is NOT optional here, and not mere hygiene. Without it `node server.js` is PID 1, and a
+# PID 1 inherits every orphaned process in the container. Node only ever waitpid()s children it
+# spawned itself (libuv reaps per tracked process handle, never waitpid(-1)), so anything it
+# inherits stays <defunct> forever. server.js shells out via `sh -c`, and `sh -c "VAR=val
+# ct-agent channel"` forks a real ct-agent grandchild -- when the round times out and that
+# grandchild is killed, it is an orphan by definition (its `sh` parent dies first), so it lands
+# on PID 1. Measured live: 75 zombies in ~1h of timing-out dials (CADS-DEMO-sort#9). tini as PID 1
+# reaps them; confirmed by building this image and re-running the reproduction against it.
+# Baked into the image rather than left to `docker run --init` / compose `init: true` so the fix
+# cannot be silently lost by however this image happens to be launched.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 \
+    && apt-get install -y --no-install-recommends python3 tini \
     && rm -rf /var/lib/apt/lists/* \
     && /usr/local/bin/ct-agent --version </dev/null
 EXPOSE 8789
+# node:20-slim's own docker-entrypoint.sh is kept (it just `exec "$@"`s) so this image behaves
+# exactly like its base apart from gaining a reaping init.
+ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
 CMD ["node", "server.js"]

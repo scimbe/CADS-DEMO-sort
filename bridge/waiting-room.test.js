@@ -619,3 +619,61 @@ test("GET /api/channel-info includes the #106 :443 fallback fields when configur
     }
   );
 });
+
+/** True while `pid` names a live, non-zombie process. Linux-only (/proc), which is what this
+ *  bridge runs on and what CI runs. */
+function pidAlive(pid) {
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] !== "Z";
+  } catch {
+    return false;
+  }
+}
+
+async function waitUntil(predicate, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  return predicate();
+}
+
+/** Regression test for the real zombie leak measured in production: the running bridge
+ *  accumulated 75 `<defunct>` children in ~1h (one per timed-out `ct-agent channel` dial,
+ *  CADS-DEMO-sort#9). `sh -c "VAR=val ct-agent channel"` forks a real grandchild and waits on it,
+ *  so SIGKILLing only the direct `sh` left `ct-agent` running and orphaned; since the bridge is
+ *  PID 1 in its container the orphan was reparented to the bridge itself, which never waitpid()s
+ *  anything it did not spawn, so it stayed a zombie forever.
+ *
+ *  This asserts the property that actually prevents that — no descendant survives the timeout —
+ *  rather than counting zombies, because a zombie only materialises when the parent is PID 1. The
+ *  test runner is not PID 1, so here the orphan would be reparented to init and silently reaped;
+ *  a zombie-count assertion would pass even against the unfixed code. */
+test("callHandlerProcess: a timeout kills the whole process group, not just the direct `sh` child", async (t) => {
+  if (process.platform !== "linux") return t.skip("needs /proc to observe real process state");
+  const { callHandlerProcess } = require("./server.js");
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sort-pgroup-"));
+  const pidFile = path.join(dir, "grandchild.pid");
+  // A real grandchild that outlives a naive kill of just `sh`, structurally like the production
+  // `VAR=val ct-agent channel` invocation. The trailing `echo` guarantees the outer shell forks
+  // instead of exec-replacing itself (dash exec-optimises a lone final command), and `exec sleep`
+  // makes the recorded `$$` the pid of the long-lived process itself.
+  const cmd = `CT_MARKER=sort-demo sh -c 'echo $$ > ${pidFile}; exec sleep 30'; echo done`;
+
+  await assert.rejects(() => callHandlerProcess(cmd, { probe: true }, 1500), /timed out/);
+
+  assert.ok(fs.existsSync(pidFile), "handler must actually have forked a grandchild to be a valid test");
+  const grandchildPid = Number(fs.readFileSync(pidFile, "utf8").trim());
+  assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 1, `bad recorded pid: ${grandchildPid}`);
+
+  // SIGKILL is delivered by the kernel, not synchronously with the promise rejection.
+  const reaped = await waitUntil(() => !pidAlive(grandchildPid), 5000);
+  if (!reaped) {
+    try { process.kill(grandchildPid, "SIGKILL"); } catch { /* already gone */ }
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+  assert.ok(reaped, `grandchild ${grandchildPid} survived the timeout -- the process group was not killed`);
+});

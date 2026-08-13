@@ -314,17 +314,43 @@ function persistJoinRequests(joinRequests) {
 
 /** Spawn `cmd` under `sh -c`, write `JSON.stringify(input)` to stdin, resolve with stdout.
  *  Rejects (never throws synchronously, never leaves a dangling process) on timeout / non-zero
- *  exit / spawn failure — exactly the contract runRound's callHandler expects. */
+ *  exit / spawn failure — exactly the contract runRound's callHandler expects.
+ *
+ *  `detached: true` puts the child in its OWN process group so the timeout path can SIGKILL the
+ *  whole group (`process.kill(-pid)`) rather than just `sh`. That is load-bearing, not hygiene:
+ *  `sh -c "VAR=val ct-agent channel"` does not exec-replace itself, it forks a real `ct-agent`
+ *  grandchild and waits on it, so killing only `sh` left that grandchild running indefinitely --
+ *  it also kept the inherited stdio pipe fds open, which delayed this promise's 'close' until it
+ *  finally exited on its own (measured: 2.5s after the SIGKILL, vs ~1ms once the group is killed).
+ *
+ *  The orphan then became a zombie, because the bridge used to run as PID 1 in its container and
+ *  a PID 1 inherits every orphan -- while Node only ever waitpid()s children it spawned itself.
+ *  Measured live: 75 `<defunct>` children in ~1h of ct-agent dials timing out (CADS-DEMO-sort#9).
+ *  That half is fixed in bridge/Dockerfile (tini as PID 1, which reaps); BOTH halves are needed --
+ *  an init alone still leaves the grandchild running, and a group kill alone still leaves a
+ *  zombie, since the grandchild is orphaned the instant its `sh` parent dies. */
 function callHandlerProcess(cmd, input, timeoutMs = TIMEOUT_MS) {
   return new Promise((resolve, reject) => {
-    const child = spawn("sh", ["-c", cmd], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn("sh", ["-c", cmd], { stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stdout = "";
     let stderr = "";
     let settled = false;
+    let exited = false;
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      child.kill("SIGKILL");
+      // Guarded on `exited`: once libuv has reaped `sh`, its pid — and therefore this pgid — can
+      // be recycled, and signalling a recycled group would hit an unrelated process.
+      if (!exited) {
+        try {
+          process.kill(-child.pid, "SIGKILL");
+        } catch (e) {
+          // ESRCH just means the group exited between the check and the signal.
+          if (e.code !== "ESRCH") {
+            process.stderr.write(`callHandlerProcess: could not kill process group ${child.pid}: ${e.message}\n`);
+          }
+        }
+      }
       reject(new Error(`role command timed out after ${Math.round(timeoutMs / 1000)}s`));
     }, timeoutMs);
 
@@ -334,6 +360,7 @@ function callHandlerProcess(cmd, input, timeoutMs = TIMEOUT_MS) {
     child.stdin.write(JSON.stringify(input), () => {});
     child.stdin.end();
 
+    child.on("exit", () => (exited = true));
     child.on("error", (e) => {
       if (settled) return;
       settled = true;
