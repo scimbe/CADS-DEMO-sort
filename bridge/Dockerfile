@@ -36,6 +36,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # CT_AGENT_REF pins a real tag, not `main`, so this image doesn't silently pick up an unreleased
 # breaking change -- bump this deliberately when a new ct-agent release is worth pulling in.
+#
+# v0.4.4 -> v0.4.6 (2026-08-13): three fixes this bridge's own `ct-agent channel` calls need, all
+# from the ct-agent#15 connectivity investigation.
+#   * v0.4.5 `318ec1a` -- a low-DPI-visibility `:443` dial rung (ordinary `h2` ALPN under a reserved
+#     SNI) for networks that fingerprint and drop the distinctive `ct-edge-channel` ALPN, plus
+#     retiring the `SNI=localhost` giveaway. Needs the matching edge route, live since `228ee31`.
+#   * v0.4.6 `600ed5c` -- the dial ladder used to STOP at the first `Refused` rung instead of
+#     falling through to the next. Without it the new rung above is unreachable in exactly the case
+#     it exists for, so v0.4.5 alone would have been inert here.
+#   * v0.4.6 `eb4de4d` -- the ping-capable `'K'` TCP-fallback role: real payload traffic on parked
+#     fallback connections, so a middlebox that ignores ACK-only keepalives stops silently killing
+#     them. Measured on this very deployment: a parked connection dies after ~10-15s idle (5s
+#     request spacing -> 4/4 OK, 20s spacing -> 1/4). The `'K'` ping interval is 8s, deliberately
+#     just under that threshold.
 FROM rust:1-slim-bookworm AS ct-agent-builder
 ARG CT_AGENT_REF=v0.4.6
 RUN apt-get update \
