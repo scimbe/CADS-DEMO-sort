@@ -778,15 +778,28 @@ async function relayGateAddr() {
  *  and prepend today's validated ones at CALL time -- old participants heal without
  *  re-approval, and a future CA rotation is picked up within the cert cache TTL. */
 async function freshenedCmd(storedCmd) {
-  const stripped = storedCmd.replace(/CT_CHANNEL_FRONT_DOOR(?:_CERT|_ONLY)?=\S+\s+/g, "");
+  const stripped = storedCmd.replace(
+    /CT_CHANNEL_(?:FRONT_DOOR(?:_CERT|_ONLY)?|RELAY_GATE(?:_CERT)?)=\S+\s+/g,
+    ""
+  );
   const liveCert = await edgeCertHex();
   const frontDoorEnv =
     process.env.SORT_CHANNEL_FRONT_DOOR && liveCert
       ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${liveCert} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
       : "";
+  // #330, retest 3: the bridge's own Initiate side needs the relay gate exactly like a NAT'd
+  // participant's Accept side does -- "omitting this when YOUR side of a channel pairing needs
+  // it fails silently downstream" applies to both halves. The broker/relay ports (4435/4436)
+  // are unreachable from outside (re-measured by the tester: both FAIL, :443 OK), so without
+  // the gate the bridge's dialer walked direct -> front-door -> boring-alpn and was refused on
+  // every rung ("edge broker refused the channel join") while the participant's gate-side half
+  // stood ready. Same live /pki/ca trust anchor as the front door.
+  const relayGate = await relayGateAddr();
+  const relayGateEnv =
+    relayGate && liveCert ? `CT_CHANNEL_RELAY_GATE=${relayGate} CT_CHANNEL_RELAY_GATE_CERT=${liveCert} ` : "";
   // Shell env-assignment prefixes are position-independent as long as they precede the command
   // word, so prepending is safe regardless of where the stripped tokens sat.
-  return frontDoorEnv + stripped;
+  return frontDoorEnv + relayGateEnv + stripped;
 }
 
 async function cpFetch(path, body) {
@@ -881,12 +894,22 @@ async function automateApproval(pending) {
   // moment CADS-DEMO-sort#9's ct-agent-binary-missing gap above was fixed and this cmd actually
   // ran for the first time). Same flag join.js's own accept-side command already correctly sets
   // for the participant's half of this same pairing.
+  // #330, retest 3: the bridge's own Initiate half needs CT_CHANNEL_RELAY_GATE(+_CERT) exactly
+  // like a NAT'd participant's Accept half -- the broker/relay ports are unreachable from
+  // outside, so without the gate this dialer walked direct -> front-door -> boring-alpn and was
+  // refused on every rung while the participant's gate side stood ready. Note freshenedCmd()
+  // re-injects both the front-door AND relay-gate tokens at every call anyway (stored cmds must
+  // survive CA reissues), so this baked copy is documentation-plus-defense, not the live value.
+  const relayGate = await relayGateAddr();
+  const relayGateEnv =
+    relayGate && liveCert ? `CT_CHANNEL_RELAY_GATE=${relayGate} CT_CHANNEL_RELAY_GATE_CERT=${liveCert} ` : "";
   const cmd =
     `CT_CHANNEL_ROLE=initiate CT_CHANNEL_RELAY_ONLY=1 CT_CHANNEL_CALL_SERVICE=text_generation ` +
     `CT_CHANNEL_GRANT=${minted.grantA} ` +
     `CT_CHANNEL_HOLDER_KEY=${bridgeHolderPriv.toString("hex")} CT_CHANNEL_NOISE_KEY=${bridgeNoisePriv.toString("hex")} ` +
     `CT_CHANNEL_BROKER=${process.env.SORT_CHANNEL_BROKER} CT_CHANNEL_RELAY=${process.env.SORT_CHANNEL_RELAY} ` +
     frontDoorEnv +
+    relayGateEnv +
     `ct-agent channel`;
 
   return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB };
