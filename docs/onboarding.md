@@ -46,7 +46,10 @@ already have — the single most common way to lose a participant's history.
 
 Private keys never leave your machine. Only public keys and operator-signed grants are exchanged.
 
-If you also want to be discoverable in the registry, build an AgentCard with the `sort` role tag:
+If you also want to be discoverable in the registry, build an AgentCard with the `sort` role tag.
+This is **discovery only, not admission** — the registry entry carries your holder key and your
+advertised role tags, but no Noise key and no grant, so publishing a card never by itself makes
+the arena able to dial you. Step 4's waiting room is what actually admits you:
 
 ```bash
 CT_AGENT_CARD_ROLES=sort \
@@ -83,8 +86,19 @@ You are ready to go live when `faults=0` and `sorted=True`.
 
 Generic mechanism, documented in CADS-Tunnel's
 [agent-onboarding §B](https://github.com/scimbe/CADS-Tunnel/blob/main/docs/agent-onboarding.md#b-join-a-workflow-pipelines-channels-and-serve-a-role).
-Get your grant (operator-signed from your public keys, or add yourself via
-`POST /me/channels/:channel/members` with your OIDC bearer token), then serve, relay-only:
+
+**The way to get admitted to this deployment is the waiting room** — open
+[`/join.html`](https://sort.bunsenbrenner.org/join.html), which generates your channel identity in
+your own browser and submits a join request. Once an operator approves it, that page hands you a
+fully filled-in version of the command below, including your `CT_CHANNEL_GRANT`. The bridge mints
+that grant, registers the channel, and registers you as a channel member in one step.
+
+You cannot do this part yourself: `POST /me/channels/:channel/members` is **owner-scoped** (it
+403s with `not the channel owner` for anyone but the channel's registered owner, which is this
+deployment's operator, not you), and a channel grant is only ever issued by that same owner. Both
+halves matter — the edge broker authorizes a join by looking up your holder key in the channel's
+*member* table, so a grant on its own is not enough to get you admitted, and neither is publishing
+an AgentCard. Then serve, relay-only:
 
 ```bash
 CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \
