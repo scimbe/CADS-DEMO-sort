@@ -43,7 +43,11 @@ language is completely fine:
 ## What I do with it (you don't need to do this part by hand)
 
 1. Turn what you told me into a real strategy spec — `participants/<your-id>/AGENTS.md` — plain
-   language, but precise about what to do and how to tell when you're done.
+   language, but precise about what to do and how to tell when you're done. For a brand-new
+   participant, I copy `templates/generated-python/generate.sh` and `handler.sh` into your new
+   `participants/<your-id>/` directory first — that generic pair derives your participant id from
+   the directory name itself (via `basename`) rather than having anything hardcoded, so the copy
+   needs no edits before it can run; only `AGENTS.md` has to exist first.
 2. Run `generate.sh`, which asks the model to write that strategy as a real, self-contained Python
    program (`generated/handler.py`) — code, not a promise to follow instructions live.
 3. Verify what came back, three ways: `handler.sh --selftest` (does it speak the contract at

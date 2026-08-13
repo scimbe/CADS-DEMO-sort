@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# participants/bubble-sort-claude/handler.sh — thin exec wrapper, two-stage harness.
+# templates/generated-python/handler.sh — generic thin exec wrapper, two-stage harness.
+# Copy this pair into a NEW participants/<your-id>/ directory alongside generate.sh; the
+# participant id below is derived from the directory name, never hardcoded, so the copy needs no
+# edits.
 #
 # The LLM's job is to WRITE this participant's sorting code once (generate.sh), not to decide
 # moves live. This file makes NO `claude -p` call — it just runs the already-generated,

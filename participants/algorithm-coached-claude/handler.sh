@@ -10,6 +10,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YOU="$(basename "$HERE")"
 GENERATED="$HERE/generated/handler.py"
 
 # Windows ships `python`/`py`, not `python3` -- and `command -v python3` is NOT enough to detect
@@ -27,10 +28,10 @@ if [ "${1:-}" = "--selftest" ]; then
     echo "SELFTEST FAIL: $GENERATED does not exist yet -- run generate.sh first" >&2
     exit 1
   }
-  out="$(printf '%s' '{"round":1,"array":[3,1,2],"history":[],"budgetRemaining":10,"mode":"solo","you":"algorithm-coached-claude"}' | "$PY" "$GENERATED")"
+  out="$(printf '{"round":1,"array":[3,1,2],"history":[],"budgetRemaining":10,"mode":"solo","you":"%s"}' "$YOU" | "$PY" "$GENERATED")"
   echo "$out" | "$PY" -c 'import sys,json; m=json.load(sys.stdin); assert m["action"] in ("compare","swap","done"), m' \
     || { echo "SELFTEST FAIL: generated handler did not emit a valid move" >&2; exit 1; }
-  echo "SELFTEST OK: algorithm-coached-claude's generated handler emits a valid move for a real round input"
+  echo "SELFTEST OK: $YOU's generated handler emits a valid move for a real round input"
   exit 0
 fi
 

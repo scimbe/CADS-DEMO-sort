@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+# templates/generated-python/generate.sh — generic two-stage scaffold, copy this pair into a
+# NEW participants/<your-id>/ directory (alongside a real AGENTS.md) rather than editing here.
+#
+# This is the generic version of what participants/bubble-sort-claude/generate.sh and
+# participants/algorithm-coached-claude/generate.sh each hand-wrote for themselves: it derives
+# the participant id from the directory name instead of hardcoding a strategy description or id
+# string, so copying this pair into a fresh directory needs zero edits before your first
+# generate.sh run — only AGENTS.md's contents (your actual strategy) has to exist first.
+#
+# GOAL/CONTEXT/CONSTRAINTS/OUTPUT framing, per CADS-DEMO-sort-docs/_explanation/instruction-structure.md.
+set -euo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+YOU="$(basename "$HERE")"
+LLM="${CT_LLM_CMD:-claude}"
+OUT_DIR="$HERE/generated"
+OUT_FILE="$OUT_DIR/handler.py"
+mkdir -p "$OUT_DIR"
+
+[ -f "$HERE/AGENTS.md" ] || {
+  echo "generate.sh: $HERE/AGENTS.md does not exist yet -- write your strategy spec there first" >&2
+  exit 1
+}
+AGENTS_MD="$(cat "$HERE/AGENTS.md")"
+PROTOCOL_MD="$(cat "$HERE/../CLAUDE.md")"
+
+# The QUOTED heredoc delimiter ('TEMPLATE_EOF') is load-bearing, not stylistic: AGENTS.md is
+# ordinary markdown, full of single-backtick code spans. An UNQUOTED heredoc here would have bash
+# treat every backtick PAIR as command substitution when the placeholders below get expanded into
+# it, silently running e.g. `array` as a shell command and corrupting the prompt with garbage
+# instead of the real markdown. Quoting the delimiter disables all interpolation in the template;
+# the placeholders are substituted afterward via plain string replacement
+# (${var//search/replacement}), which never re-interprets the replacement text as shell, however
+# many backticks or `$` characters it contains.
+TEMPLATE="$(cat <<'TEMPLATE_EOF'
+GOAL
+Write a single, complete, self-contained Python 3 program that implements the sorting strategy
+described below as real, deterministic code — not as instructions for a model to follow live.
+The program is invoked fresh once per round by a shell wrapper; it must read one round-input
+JSON object from stdin and write exactly one move JSON object to stdout, per the contract.
+
+CONTEXT
+Shared move-protocol contract (docs/protocol.md, restated via participants/CLAUDE.md):
+__PROTOCOL_MD__
+
+Strategy participant "__YOU__" must implement, stateless-per-invocation (this program is invoked
+fresh every round with no memory of past calls beyond what the round-input's own `history` field
+carries — reconstruct any notion of "where you are" from that, never from a variable that would
+need to persist across invocations):
+__AGENTS_MD__
+
+CONSTRAINTS
+- Output ONLY the Python source code, nothing else — no markdown fences, no prose before or
+  after, no explanation. The very first character of your output must be Python code.
+- The program must use only the Python standard library (json, sys). No third-party imports,
+  no network access, no file I/O beyond stdin/stdout.
+- It must read the ENTIRE round-input JSON object from stdin (json.load(sys.stdin)), reconstruct
+  any state exactly as AGENTS.md describes, and write exactly one JSON object to stdout via
+  print(json.dumps(...)) — no trailing extra output, no debug prints.
+- It must be deterministic: the same round-input JSON must always produce the same move JSON.
+- It must never crash on well-formed input described by the contract — always emit a valid
+  {"action": "compare"|"swap"|"done", ...} object.
+- Do not hardcode the array or any array-specific logic — the program must work for any array
+  the contract describes, of any length within the protocol's bounds.
+
+OUTPUT
+Emit the complete contents of generated/handler.py as raw Python source, and nothing else.
+TEMPLATE_EOF
+)"
+PROMPT="${TEMPLATE//__PROTOCOL_MD__/$PROTOCOL_MD}"
+PROMPT="${PROMPT//__AGENTS_MD__/$AGENTS_MD}"
+PROMPT="${PROMPT//__YOU__/$YOU}"
+
+RAW="$("$LLM" -p "$PROMPT" --output-format text \
+  --disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent" 2>/dev/null)" || {
+  echo "generate.sh: claude -p failed" >&2
+  exit 1
+}
+
+# Strip a markdown fence if the model added one anyway, despite the CONSTRAINTS above --
+# defensive, not load-bearing: real-world LLM output sometimes wraps code in ```python...```
+# even when told not to.
+CODE="$(printf '%s\n' "$RAW" | sed -e '/^```/d')"
+
+printf '%s\n' "$CODE" > "$OUT_FILE"
+chmod +x "$OUT_FILE"
+
+echo "generate.sh: wrote $OUT_FILE ($(wc -l < "$OUT_FILE") lines)"
+echo "generate.sh: verify with: $HERE/handler.sh --selftest"
