@@ -161,7 +161,16 @@ form.addEventListener("submit", async (ev) => {
       submitBtn.disabled = false;
       return;
     }
-    showNote("Request submitted. Waiting for an operator to review it…", "ok");
+    // Auto-approval (2026-08-13): a Keycloak-authenticated submit is approved on the spot --
+    // the response says so, and the status poll below then returns the grant on its first
+    // request instead of after a human review. The waiting-room copy only shows on
+    // deployments still running the manual-review flow.
+    showNote(
+      result.approved
+        ? "Approved automatically (your login is your legitimization) — fetching your grant…"
+        : "Request submitted. Waiting for an operator to review it…",
+      "ok"
+    );
     pollStatus(body.you);
   } catch (e) {
     showNote(`request failed: ${e.message}`, "error");

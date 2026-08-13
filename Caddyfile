@@ -35,13 +35,17 @@
 	#      order, not textual order, so without route{} the header-strip can run AFTER
 	#      forward_auth sets the real value, deleting a legitimate identity instead of just a
 	#      spoofed one (live-confirmed against the compiled JSON config upstream).
-	#   2. the public submit exemption below matches on METHOD + exact path, never a wildcard --
-	#      path matchers have no concept of HTTP method, so `path /api/join-requests*` would
-	#      also exempt the admin-only GET/approve/decline routes from the gate entirely.
-	@join-submit {
-		method POST
-		path /api/join-requests
-	}
+	#   2. path matchers have no concept of HTTP method -- every matcher below stays as narrow
+	#      (exact path, or method+path) as the route it names, so widening one can never
+	#      accidentally widen another.
+	#
+	# 2026-08-13 (auto-approval rework): POST /api/join-requests used to be explicitly EXEMPTED
+	# from the gate here (a `@join-submit` matcher + its own public `handle` block) so an
+	# anonymous visitor could queue a request for manual admin approval. That's gone -- a real
+	# Keycloak login is now what legitimizes a participant (see server.js's
+	# handleJoinRequestSubmit), so the submit path falls through to `@gated-api` below like
+	# every other join-requests route already did (its path pattern already covered the bare
+	# `/api/join-requests`, GET and POST alike -- only POST had a carve-out).
 	@channel-info {
 		method GET
 		path /api/channel-info
@@ -49,14 +53,11 @@
 	# A participant's own join.js polls its OWN status by "you" id after submitting -- public by
 	# design (see handleJoinRequestStatus's own comment: a grant is only usable by whoever holds
 	# the matching private key, so reading the grant string itself isn't sensitive). Method+exact-
-	# shape matched, same discipline as @join-submit above, so this can never accidentally widen
-	# to also exempt /approve or /decline (which don't end in /status).
+	# shape matched so this can never accidentally widen to also exempt /approve or /decline
+	# (which don't end in /status).
 	@join-status {
 		method GET
 		path /api/join-requests/*/status
-	}
-	handle @join-submit {
-		reverse_proxy sort-demo-bridge:8789
 	}
 	handle @channel-info {
 		reverse_proxy sort-demo-bridge:8789
@@ -124,6 +125,44 @@
 	# gate check and file_server in the SAME route{} keeps the required write-order guarantee
 	# (see the reverse_proxy-vs-request_header ordering gotcha documented above) without a
 	# second gate check ever reaching the bridge for a plain static-file request.
+	#
+	# 2026-08-13: join.html gets the IDENTICAL treatment -- a real Keycloak login IS the
+	# legitimization for becoming a participant now (auto-approval, see server.js's
+	# handleJoinRequestSubmit), so an anonymous visitor can no longer even LOAD the join page;
+	# forward_auth's own redirect to Keycloak is what an unauthenticated browser sees first.
+	@gated-join-page {
+		path /join.html
+	}
+	handle @gated-join-page {
+		route {
+			request_header -X-Gate-Email
+			forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+				uri /gate/check
+				copy_headers X-Gate-Email
+			}
+			root * /srv
+			file_server
+		}
+	}
+
+	# join.js's accurate "logged in as X / auto-approval active" copy. A tiny, ALWAYS-gated
+	# endpoint: reaching the bridge handler at all proves forward_auth passed, and the bridge
+	# just echoes the verified identity back (see handleWhoami). /api/channel-info itself stays
+	# public (non-browser/bootstrap callers need it), so it cannot carry this reliably.
+	@whoami {
+		path /api/whoami
+	}
+	handle @whoami {
+		route {
+			request_header -X-Gate-Email
+			forward_auth https://{$CT_GATE_UPSTREAM_HOST} {
+				uri /gate/check
+				copy_headers X-Gate-Email
+			}
+			reverse_proxy sort-demo-bridge:8789
+		}
+	}
+
 	@gated-admin-page {
 		path /admin.html
 	}

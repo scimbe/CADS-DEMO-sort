@@ -198,7 +198,7 @@ const ADMIN_EMAILS = new Set(
 );
 
 function gateVerifiedEmail(req) {
-  const email = req.headers["x-gate-email"];
+  const email = req && req.headers ? req.headers["x-gate-email"] : null;
   return email ? String(email).trim().toLowerCase() : null;
 }
 
@@ -281,6 +281,20 @@ const JOIN_REQUEST_RATE_LIMIT = 10;
 const JOIN_REQUEST_RATE_WINDOW_MS = 60 * 1000;
 const joinRequestRateLimited = makeRateLimiter(JOIN_REQUEST_RATE_LIMIT, JOIN_REQUEST_RATE_WINDOW_MS);
 const JOIN_REQUEST_MAX_PENDING = 200;
+
+/** Auto-approval (2026-08-13, tutorial rework): a Keycloak login IS the legitimization -- once
+ *  Caddy's forward_auth has verified a real account (see the Caddyfile's `@join-page`/
+ *  `@join-submit` gate blocks and `gateVerifiedEmail` below), a join request is approved
+ *  IMMEDIATELY instead of sitting in the admin queue. That removes a manual click from every
+ *  participant's path but also removes the one thing that click used to bound: how many live
+ *  participants (each with its own control-plane registration + a held channel-relay member) one
+ *  logged-in account can mint. AUTO_APPROVE_RATE_LIMIT caps it per gate-verified email, same
+ *  fixed-window shape as joinRequestRateLimited above -- generous enough for genuine iteration
+ *  (rebuild your handler, rejoin) inside a workshop, tight enough that a buggy script under one
+ *  real account can't fork-bomb the bridge's persistent-client processes. */
+const AUTO_APPROVE_RATE_LIMIT = 5;
+const AUTO_APPROVE_RATE_WINDOW_MS = 60 * 60 * 1000;
+const autoApproveRateLimited = makeRateLimiter(AUTO_APPROVE_RATE_LIMIT, AUTO_APPROVE_RATE_WINDOW_MS);
 const HEX32_RE = /^[0-9a-f]{64}$/i;
 const HEX64_RE = /^[0-9a-f]{128}$/i;
 const PARTICIPANT_ID_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
@@ -1115,6 +1129,14 @@ async function handleChannelInfo(req, res) {
       // grant (see docs/operations.md); the password itself never reaches this bridge.
       oidcIssuerBase: process.env.SORT_OIDC_ISSUER_BASE || null,
       oidcClientId: OIDC_CLIENT_ID,
+      // Auto-approval (2026-08-13): lets join.js show accurate copy instead of a generic
+      // "waiting for review" message. `gateAuthenticated` reflects THIS request's own
+      // X-Gate-Email (Caddy's forward_auth already ran before this handler by the time we're
+      // here) -- true only when the join page's Keycloak gate is both configured AND actually
+      // enforcing (the portal's per-tunnel "require login" toggle, see Caddyfile's own comment
+      // on that being a separate operator switch from forward_auth simply being wired up).
+      autoApproveAvailable: automationConfigured(),
+      gateAuthenticated: Boolean(gateVerifiedEmail(req)),
     })
   );
 }
@@ -1124,7 +1146,7 @@ async function handleChannelInfo(req, res) {
  *  channel_id_for_link(operatorPub, bridgeHolderPub, holderPub) itself rather than trusting a
  *  caller-supplied channel id, so a bad submission is rejected at submit time (400), not
  *  discovered by an operator later at approval time. */
-async function handleJoinRequestSubmit(req, res, joinRequests, participants) {
+async function handleJoinRequestSubmit(req, res, joinRequests, participants, pendingGrantDelivery) {
   if (joinRequestRateLimited(clientIp(req))) return jsonError(res, 429, "too many requests -- try again later");
   let body;
   try {
@@ -1160,10 +1182,58 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants) {
   );
   if (!valid) return jsonError(res, 400, "attestation does not verify against holderPub for this deployment's channel");
 
+  // Auto-approval (2026-08-13): a Keycloak login is sufficient legitimization -- when Caddy's
+  // gate verified a real account for this request AND automation is configured, approve
+  // immediately instead of queuing for a manual admin click. `gateVerifiedEmail` deliberately
+  // does NOT check SORT_ADMIN_EMAILS here (unlike requireAdmin) -- ANY real, gate-authenticated
+  // account is enough to legitimize a participant; the admin allowlist stays specific to admin
+  // ACTIONS (revoke, viewing the roster), a different and stricter question. Falls through to
+  // the historical manual-queue path when either condition is false -- an ungated deployment
+  // (Caddy's tunnel-level "require login" toggle is off) or one without automation configured
+  // keeps working exactly as before, no behavior change for those.
+  const gateEmail = gateVerifiedEmail(req);
+  if (gateEmail && automationConfigured()) {
+    if (autoApproveRateLimited(gateEmail)) {
+      return jsonError(
+        res,
+        429,
+        `too many participants approved for this account in the last hour (max ${AUTO_APPROVE_RATE_LIMIT}) -- try again later`
+      );
+    }
+    const pending = { you, label: label || you, holderPub, noisePub, attestation };
+    let result;
+    try {
+      result = await automateApproval(pending);
+    } catch (e) {
+      process.stderr.write(`join-requests: auto-approval failed for "${you}" (${gateEmail}): ${e.message}\n`);
+      return jsonError(res, 500, "automated approval failed -- see bridge logs");
+    }
+    if (!result.ok) {
+      return jsonError(res, 502, `automated approval failed: ${result.detail}`);
+    }
+    addApprovedParticipant(participants, { you, label: pending.label, cmd: result.cmd });
+    pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
+    process.stderr.write(`join-requests: auto-approved "${you}" (${gateEmail})\n`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(JSON.stringify({ ok: true, channelId: channel.toString("hex"), approved: true }));
+    return;
+  }
+
   joinRequests.set(you, { you, label: label || you, holderPub, noisePub, attestation, createdAt: Date.now() });
   persistJoinRequests(joinRequests);
   res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify({ ok: true, channelId: channel.toString("hex") }));
+  res.end(JSON.stringify({ ok: true, channelId: channel.toString("hex"), approved: false }));
+}
+
+/** GET /api/whoami -- ALWAYS behind Caddy's forward_auth (see Caddyfile's @whoami block):
+ *  reaching this handler at all proves the gate verified a real Keycloak account, so it just
+ *  echoes the verified identity + whether auto-approval would apply. join.js uses it for
+ *  accurate "logged in as X" copy; it exposes nothing an authenticated caller doesn't already
+ *  know about themselves. */
+function handleWhoami(req, res) {
+  const email = gateVerifiedEmail(req);
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ email, autoApprove: Boolean(email && automationConfigured()) }));
 }
 
 /** GET /api/join-requests -- admin-only. */
@@ -1342,6 +1412,10 @@ function main() {
       handleChannelInfo(req, res);
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/whoami") {
+      handleWhoami(req, res);
+      return;
+    }
     if (req.method === "POST" && url.pathname === "/api/admin/oidc-session") {
       handleOidcSessionSubmit(req, res);
       return;
@@ -1359,7 +1433,7 @@ function main() {
       return;
     }
     if (req.method === "POST" && url.pathname === "/api/join-requests") {
-      handleJoinRequestSubmit(req, res, joinRequests, participants);
+      handleJoinRequestSubmit(req, res, joinRequests, participants, pendingGrantDelivery);
       return;
     }
     if (req.method === "GET" && url.pathname === "/api/join-requests") {
@@ -1433,6 +1507,7 @@ module.exports = {
   handleRun,
   handleChannelInfo,
   handleJoinRequestSubmit,
+  handleWhoami,
   handleJoinRequestsList,
   handleJoinRequestApprove,
   handleJoinRequestDecline,

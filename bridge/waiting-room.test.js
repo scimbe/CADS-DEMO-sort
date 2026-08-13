@@ -207,6 +207,58 @@ test("handleJoinRequestSubmit: queues a genuinely valid, verified submission", a
   );
 });
 
+test("handleJoinRequestSubmit: falls back to the manual queue when unauthenticated OR automation is unconfigured (auto-approval contract)", async () => {
+  // 2026-08-13 auto-approval: the immediate-approve branch requires BOTH a gate-verified
+  // identity AND automationConfigured(). This freezes the fallback half of the contract --
+  // without either precondition, a valid submit still queues exactly as before (and the
+  // response now says `approved: false` so join.js can render accurate copy). The positive
+  // auto-approve half exercises automateApproval's real CP round-trips and is covered by the
+  // deployment smoke flow, not unit tests.
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
+      SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests-auto.json"),
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleJoinRequestSubmit } = require("./server.js");
+
+      // Unauthenticated (no X-Gate-Email): queued.
+      const joinRequests = new Map();
+      const res = fakeRes();
+      await handleJoinRequestSubmit(
+        fakeReq({ you: "anon-flow", holderPub: vectors.holder_a_pub, noisePub: vectors.noise_a_pub, attestation: vectors.positive.signature }),
+        res,
+        joinRequests,
+        new Map(),
+        new Map()
+      );
+      assert.equal(res.statusCode, 200);
+      assert.equal(JSON.parse(res.body).approved, false, "no gate identity -> manual queue, stated explicitly");
+      assert.equal(joinRequests.size, 1);
+
+      // Gate-authenticated but automation NOT configured (no operator/bridge keys in this env):
+      // also queued -- a gated-but-unautomated deployment keeps the manual review flow.
+      const joinRequests2 = new Map();
+      const res2 = fakeRes();
+      await handleJoinRequestSubmit(
+        fakeReq(
+          { you: "gated-flow", holderPub: vectors.holder_a_pub, noisePub: vectors.noise_a_pub, attestation: vectors.positive.signature },
+          { "x-gate-email": "workshop-user@example.org" }
+        ),
+        res2,
+        joinRequests2,
+        new Map(),
+        new Map()
+      );
+      assert.equal(res2.statusCode, 200);
+      assert.equal(JSON.parse(res2.body).approved, false, "gate identity without automation -> still the manual queue");
+      assert.equal(joinRequests2.size, 1);
+    }
+  );
+});
+
 test("handleJoinRequestSubmit: rejects a duplicate id already live or already pending", async () => {
   await withEnv(
     {
