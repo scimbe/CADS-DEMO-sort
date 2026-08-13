@@ -791,21 +791,20 @@ async function freshenedCmd(storedCmd) {
     process.env.SORT_CHANNEL_FRONT_DOOR && liveCert
       ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${liveCert} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
       : "";
-  // #330, retest 3: the bridge's own Initiate side needs the relay gate exactly like a NAT'd
-  // participant's Accept side does -- "omitting this when YOUR side of a channel pairing needs
-  // it fails silently downstream" applies to both halves. The broker/relay ports (4435/4436)
-  // are unreachable from outside (re-measured by the tester: both FAIL, :443 OK), so without
-  // the gate the bridge's dialer walked direct -> front-door -> boring-alpn and was refused on
-  // every rung ("edge broker refused the channel join") while the participant's gate-side half
-  // stood ready. Same live /pki/ca trust anchor as the front door. Gated on liveCert (and thus
-  // SORT_CHANNEL_FRONT_DOOR) same as relayGateEnv itself requires -- no deployment shape needs
-  // this fetched without a front door configured.
-  const relayGate = liveCert ? await relayGateAddr() : null;
-  const relayGateEnv =
-    relayGate && liveCert ? `CT_CHANNEL_RELAY_GATE=${relayGate} CT_CHANNEL_RELAY_GATE_CERT=${liveCert} ` : "";
-  // Shell env-assignment prefixes are position-independent as long as they precede the command
-  // word, so prepending is safe regardless of where the stripped tokens sat.
-  return frontDoorEnv + relayGateEnv + stripped;
+  // Retest 4 CORRECTION -- CT_CHANNEL_RELAY_GATE is deliberately NOT injected here anymore.
+  // ct-agent's gate mode (`join_via_relay_gate_dcutr`) runs the channel-join ADMISSION over a
+  // plain QUIC connection to the relay port (:4436) regardless -- the :443 gate only carries
+  // the post-admission Circuit-Relay leg (verified in ct-agent channel_run.rs; its own comment
+  // says the admission conn "is unconditionally a QUIC connection ... to the relay/broker
+  // port, not the :443 relay-gate leg at all"). On this UDP-blocked host the gate mode
+  // therefore made the bridge's Initiate DIE at admission ("Error: TimedOut") instead of using
+  // the :443 front-door ladder it can actually reach -- and even for UDP-capable members the
+  // gate path parks them in the edge's QUIC pairer while the bridge parks in the :443 pairer,
+  // where the two can never pair (CADS-Tunnel#495). Until #495 unifies the pairers, BOTH
+  // halves of an arena pairing must dial :443 front-door-only -- which frontDoorEnv above
+  // already enforces. The stripping regex still removes any RELAY_GATE tokens baked into
+  // stored commands by the brief window where this file injected them.
+  return frontDoorEnv + stripped;
 }
 
 async function cpFetch(path, body) {
@@ -900,25 +899,18 @@ async function automateApproval(pending) {
   // moment CADS-DEMO-sort#9's ct-agent-binary-missing gap above was fixed and this cmd actually
   // ran for the first time). Same flag join.js's own accept-side command already correctly sets
   // for the participant's half of this same pairing.
-  // #330, retest 3: the bridge's own Initiate half needs CT_CHANNEL_RELAY_GATE(+_CERT) exactly
-  // like a NAT'd participant's Accept half -- the broker/relay ports are unreachable from
-  // outside, so without the gate this dialer walked direct -> front-door -> boring-alpn and was
-  // refused on every rung while the participant's gate side stood ready. Note freshenedCmd()
-  // re-injects both the front-door AND relay-gate tokens at every call anyway (stored cmds must
-  // survive CA reissues), so this baked copy is documentation-plus-defense, not the live value.
-  // Same "skip the round-trip when it can't matter" discipline as liveCert above -- relayGateEnv
-  // below is gated on liveCert (and thus on SORT_CHANNEL_FRONT_DOOR) anyway, so there's no
-  // deployment shape where fetching this without a front door configured would ever be used.
-  const relayGate = liveCert ? await relayGateAddr() : null;
-  const relayGateEnv =
-    relayGate && liveCert ? `CT_CHANNEL_RELAY_GATE=${relayGate} CT_CHANNEL_RELAY_GATE_CERT=${liveCert} ` : "";
+  // Retest 4: deliberately NO CT_CHANNEL_RELAY_GATE here (nor in freshenedCmd) -- ct-agent's
+  // gate mode runs its ADMISSION over QUIC :4436 regardless (the :443 gate only carries the
+  // post-admission circuit), which this UDP-blocked host cannot reach, and which would park a
+  // UDP-capable peer in the edge's QUIC pairer while this side parks in the :443 pairer
+  // (disjoint pairers, CADS-Tunnel#495). Until #495, both halves of a pairing must be
+  // front-door-only, which frontDoorEnv enforces.
   const cmd =
     `CT_CHANNEL_ROLE=initiate CT_CHANNEL_RELAY_ONLY=1 CT_CHANNEL_CALL_SERVICE=text_generation ` +
     `CT_CHANNEL_GRANT=${minted.grantA} ` +
     `CT_CHANNEL_HOLDER_KEY=${bridgeHolderPriv.toString("hex")} CT_CHANNEL_NOISE_KEY=${bridgeNoisePriv.toString("hex")} ` +
     `CT_CHANNEL_BROKER=${process.env.SORT_CHANNEL_BROKER} CT_CHANNEL_RELAY=${process.env.SORT_CHANNEL_RELAY} ` +
     frontDoorEnv +
-    relayGateEnv +
     `ct-agent channel`;
 
   return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB };

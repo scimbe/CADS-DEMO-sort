@@ -232,22 +232,19 @@ function renderApproved(channel, grant) {
         `CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert} \\\n` +
         `CT_CHANNEL_FRONT_DOOR_ONLY=1 \\\n`
       : "";
-  // #330 relay gate: the :443-multiplexed gated relay a NAT-only participant needs IN ADDITION
-  // to broker/relay -- deliberately a separate protocol from CT_CHANNEL_RELAY, and omitting it
-  // fails silently for exactly the networks that need it most (measured on this deployment:
-  // 0 sessions in 90s without it vs 3 stable sessions with it, same v0.4.8 + grant). Included
-  // whenever the deployment publishes it, same "absent -> omitted" treatment as the front door.
-  const relayGateLine =
-    channelInfo.channelRelayGate && channelInfo.channelRelayGateCert
-      ? `CT_CHANNEL_RELAY_GATE=${channelInfo.channelRelayGate} \\\n` +
-        `CT_CHANNEL_RELAY_GATE_CERT=${channelInfo.channelRelayGateCert} \\\n`
-      : "";
+  // Deliberately NO CT_CHANNEL_RELAY_GATE in this command (retest 4 finding): ct-agent's gate
+  // mode still runs its channel-join ADMISSION over QUIC :4436 (the :443 gate only carries the
+  // post-admission circuit), which parks the participant in the edge's QUIC pairer -- while
+  // the arena bridge, front-door-only, parks in the :443 pairer. The two pairers are disjoint
+  // (CADS-Tunnel#495), so a gate-mode participant can NEVER pair with this bridge, however
+  // healthy both sides look. Until #495 unifies them, both halves must be front-door-only --
+  // exactly what this command (frontDoorLine + FRONT_DOOR_ONLY) produces. The relay-gate
+  // values remain published in /api/channel-info for non-arena uses.
   pre.textContent =
     `CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \\\n` +
     `CT_CHANNEL_BROKER=${channelInfo.channelBroker || "<ask the operator>"} ` +
     `CT_CHANNEL_RELAY=${channelInfo.channelRelay || "<ask the operator>"} \\\n` +
     frontDoorLine +
-    relayGateLine +
     `CT_CHANNEL_GRANT=${grant} \\\n` +
     `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv} \\\n` +
     `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv} \\\n` +
