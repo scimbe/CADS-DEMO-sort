@@ -890,8 +890,16 @@ async function handleJoinRequestApprove(req, res, joinRequests, participants, pe
 function handleJoinRequestStatus(req, res, joinRequests, pendingGrantDelivery, you) {
   if (pendingGrantDelivery.has(you)) {
     const entry = pendingGrantDelivery.get(you);
-    pendingGrantDelivery.delete(you); // single delivery -- the participant's own join.js is the only reader
     res.writeHead(200, { "content-type": "application/json" });
+    // Delete only once the response has actually finished writing -- a connection reset
+    // mid-response (real, reproduced: CADS-DEMO-sort#9, intermittent `RemoteDisconnected`
+    // against this same bridge from one real participant's network) must not be treated as
+    // delivered. Deleting eagerly (the previous behavior) meant that exact failure silently
+    // destroyed the participant's only copy of grantB with no retry path -- "single delivery"
+    // was meant to stop a stale grant lingering forever, not to punish a dropped connection.
+    // A retry that lands after a genuine successful delivery finds the entry gone and reports
+    // "unknown", same as today; a retry after a failed delivery now finds it still there.
+    res.on("finish", () => pendingGrantDelivery.delete(you));
     res.end(JSON.stringify({ status: "approved", channel: entry.channel, grant: entry.grantB }));
     return;
   }

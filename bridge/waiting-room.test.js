@@ -27,18 +27,23 @@ function fakeReq(body, headers) {
 }
 
 /** Captures writeHead/end calls instead of writing to a real socket. */
-function fakeRes() {
-  const res = {
-    statusCode: undefined,
-    headers: undefined,
-    body: undefined,
-    writeHead(code, headers) {
-      res.statusCode = code;
-      res.headers = headers;
-    },
-    end(body) {
-      res.body = body;
-    },
+/** A real EventEmitter (not a plain object) so `res.on("finish", ...)` works exactly as it does
+ *  on a real http.ServerResponse. `end()` emits `finish` by default, matching a response that
+ *  actually completed writing to the client; pass `emitFinish: false` to model a connection reset
+ *  mid-response (CADS-DEMO-sort#9: a real, reproduced `RemoteDisconnected` against this same
+ *  bridge) -- code that deletes state only inside a `finish` listener must NOT lose it in that case. */
+function fakeRes({ emitFinish = true } = {}) {
+  const res = new EventEmitter();
+  res.statusCode = undefined;
+  res.headers = undefined;
+  res.body = undefined;
+  res.writeHead = (code, headers) => {
+    res.statusCode = code;
+    res.headers = headers;
+  };
+  res.end = (body) => {
+    res.body = body;
+    if (emitFinish) res.emit("finish");
   };
   return res;
 }
@@ -426,6 +431,54 @@ test(
     } finally {
       stub.close();
     }
+  }
+);
+
+// --- Join-request status polling (join.js's post-approval GET) --------------------------------
+
+test("handleJoinRequestStatus: delivers the pending grant once and clears it on success", () => {
+  delete require.cache[require.resolve("./server.js")];
+  const { handleJoinRequestStatus } = require("./server.js");
+  const joinRequests = new Map();
+  const pendingGrantDelivery = new Map([["p1", { channel: "chan-hex", grantB: "grant-hex", createdAt: Date.now() }]]);
+
+  const res = fakeRes();
+  handleJoinRequestStatus({}, res, joinRequests, pendingGrantDelivery, "p1");
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(JSON.parse(res.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
+  assert.equal(pendingGrantDelivery.has("p1"), false, "delivered successfully, so single-delivery clears it");
+
+  const res2 = fakeRes();
+  handleJoinRequestStatus({}, res2, joinRequests, pendingGrantDelivery, "p1");
+  assert.deepEqual(JSON.parse(res2.body), { status: "unknown" }, "second poll finds nothing left to deliver");
+});
+
+test(
+  "handleJoinRequestStatus: a connection reset mid-response must NOT destroy the only copy of the grant " +
+    "(CADS-DEMO-sort#9: real, reproduced RemoteDisconnected against this same bridge)",
+  () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { handleJoinRequestStatus } = require("./server.js");
+    const joinRequests = new Map();
+    const pendingGrantDelivery = new Map([["p1", { channel: "chan-hex", grantB: "grant-hex", createdAt: Date.now() }]]);
+
+    // emitFinish: false models exactly what CADS-DEMO-sort#9 observed: end() is called (the
+    // handler believes it answered), but the response never actually finishes reaching the
+    // client -- the connection reset first.
+    const res = fakeRes({ emitFinish: false });
+    handleJoinRequestStatus({}, res, joinRequests, pendingGrantDelivery, "p1");
+    assert.equal(res.statusCode, 200, "the handler still believes it answered");
+    assert.ok(
+      pendingGrantDelivery.has("p1"),
+      "the grant must survive an unfinished response so a retry can still succeed"
+    );
+
+    // The retry that follows a real reset: this time the response actually finishes.
+    const res2 = fakeRes();
+    handleJoinRequestStatus({}, res2, joinRequests, pendingGrantDelivery, "p1");
+    assert.deepEqual(JSON.parse(res2.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
+    assert.equal(pendingGrantDelivery.has("p1"), false, "the retry's own successful delivery clears it");
   }
 );
 
