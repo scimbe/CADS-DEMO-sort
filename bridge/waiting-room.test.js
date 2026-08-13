@@ -684,6 +684,60 @@ async function waitUntil(predicate, timeoutMs) {
  *  rather than counting zombies, because a zombie only materialises when the parent is PID 1. The
  *  test runner is not PID 1, so here the orphan would be reparented to init and silently reaped;
  *  a zombie-count assertion would pass even against the unfixed code. */
+test("PersistentRoleClient: multiplexes calls over ONE held process and reports its pid stably (#19)", async () => {
+  // The whole point of #19: call N+1 must reuse the SAME child (one held channel session),
+  // not spawn per call. The stub speaks the exact ct-agent v0.4.9 envelope contract: one JSON
+  // request per stdin line, one {"ok":true,"output":...} envelope per stdout line -- and embeds
+  // its own $$-equivalent (process.pid) in the output so same-process reuse is OBSERVABLE.
+  const { PersistentRoleClient } = require("./server.js");
+  const stub =
+    `node -e '` +
+    `const rl=require("readline").createInterface({input:process.stdin});` +
+    `rl.on("line",(l)=>{const req=JSON.parse(l);` +
+    `console.log(JSON.stringify({ok:true,output:JSON.stringify({pid:process.pid,echo:req.round})}))});` +
+    `'`;
+  const client = new PersistentRoleClient(async () => stub);
+  const a = JSON.parse(await client.call({ round: 1 }, 5000));
+  const b = JSON.parse(await client.call({ round: 2 }, 5000));
+  const c = JSON.parse(await client.call({ round: 3 }, 5000));
+  assert.equal(a.echo, 1);
+  assert.equal(b.echo, 2);
+  assert.equal(c.echo, 3);
+  assert.equal(a.pid, b.pid, "call 2 reused the SAME held process");
+  assert.equal(b.pid, c.pid, "call 3 too -- one session per participant, not per round");
+  client._kill();
+});
+
+test("PersistentRoleClient: a dead child is respawned transparently and an error envelope surfaces as a named error (#19)", async () => {
+  const { PersistentRoleClient } = require("./server.js");
+  // Stub 1: answers one call, then exits (simulates a mid-run session death between rounds).
+  const dieAfterOne =
+    `node -e '` +
+    `const rl=require("readline").createInterface({input:process.stdin});` +
+    `rl.on("line",()=>{console.log(JSON.stringify({ok:true,output:String(process.pid)}));process.exit(0)});` +
+    `'`;
+  const client = new PersistentRoleClient(async () => dieAfterOne);
+  const pid1 = await client.call({ round: 1 }, 5000);
+  // The child exited after answering; the next call must respawn (new pid), not fail.
+  const pid2 = await client.call({ round: 2 }, 5000);
+  assert.notEqual(pid1, pid2, "the second call ran on a RESPAWNED child after the first one died");
+  client._kill();
+
+  // An {"ok":false,...} envelope surfaces as a named error (after the one respawn+retry).
+  const alwaysErr =
+    `node -e '` +
+    `const rl=require("readline").createInterface({input:process.stdin});` +
+    `rl.on("line",()=>console.log(JSON.stringify({ok:false,error:"service exploded"})));` +
+    `'`;
+  const failing = new PersistentRoleClient(async () => alwaysErr);
+  await assert.rejects(
+    () => failing.call({ round: 1 }, 5000),
+    /service exploded/,
+    "the structured error reason reaches the caller verbatim"
+  );
+  failing._kill();
+});
+
 test("callHandlerProcess: a timeout kills the whole process group, not just the direct `sh` child", async (t) => {
   if (process.platform !== "linux") return t.skip("needs /proc to observe real process state");
   const { callHandlerProcess } = require("./server.js");

@@ -380,6 +380,157 @@ function callHandlerProcess(cmd, input, timeoutMs = TIMEOUT_MS) {
   });
 }
 
+/** #19 (ct-agent v0.4.9): one PERSISTENT role-command process per participant, holding ONE channel
+ *  session for its whole life and multiplexing calls as NDJSON lines over stdio -- instead of a
+ *  fresh spawn (= a fresh join + pairing + Noise handshake, and one roll of the accept side's
+ *  re-park gap) per round. Measured motivation: the per-round model produced a structural 15-22%
+ *  transport-fault rate (ct-agent#18) and ~200-500ms handshake overhead per round.
+ *
+ *  Contract with `ct-agent channel` under CT_CHANNEL_CALL_PERSISTENT=1: one JSON request per stdin
+ *  line; one envelope per stdout line ({"ok":true,"output":...} / {"ok":false,"error":...} as the
+ *  structured last line before a non-zero exit). Failure model: any broken call kills the child
+ *  (process GROUP, same recycled-pid-guarded pattern as callHandlerProcess) and ONE respawn+retry
+ *  is attempted before the error surfaces -- the run-level supervision the per-round model had,
+ *  kept at run granularity. Calls are serialized per participant (arena rounds are sequential per
+ *  participant anyway), so no response-to-request correlation is needed beyond FIFO. */
+class PersistentRoleClient {
+  /** `cmdProvider`: async () -> the full shell command to spawn. Injected (production passes the
+   *  freshenedCmd + CT_CHANNEL_CALL_PERSISTENT prefix builder) so tests can substitute a stub
+   *  process without a real ct-agent binary or edge. */
+  constructor(cmdProvider) {
+    this.cmdProvider = cmdProvider;
+    this.child = null;
+    this.buf = "";
+    this.stderrTail = "";
+    this.pendingResolve = null; // FIFO depth 1 -- calls are serialized via `chain`
+    this.chain = Promise.resolve();
+  }
+
+  call(input, timeoutMs = TIMEOUT_MS) {
+    const run = () => this._callOnce(input, timeoutMs).catch(async (first) => {
+      // One respawn+retry: the child (and its held session) may have died between rounds.
+      this._kill();
+      try {
+        return await this._callOnce(input, timeoutMs);
+      } catch (second) {
+        throw new Error(`persistent role command failed (retry after respawn also failed): ${second.message} (first: ${first.message})`);
+      }
+    });
+    // Serialize per participant; a failed call must not poison the chain for the next one.
+    const result = this.chain.then(run, run);
+    this.chain = result.catch(() => {});
+    return result;
+  }
+
+  async _callOnce(input, timeoutMs) {
+    if (!this.child) await this._spawn();
+    const child = this.child;
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        this._kill(); // a stuck call kills the whole child; the NEXT call respawns
+        reject(new Error(`role command timed out after ${Math.round(timeoutMs / 1000)}s`));
+      }, timeoutMs);
+      this.pendingResolve = (err, envelope) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.pendingResolve = null;
+        if (err) return reject(err);
+        if (envelope.ok) return resolve(String(envelope.output ?? ""));
+        reject(new Error(`role command reported: ${envelope.error || "unknown error"}`));
+      };
+      child.stdin.write(JSON.stringify(input) + "\n", (e) => {
+        if (e && this.pendingResolve) this.pendingResolve(new Error(`stdin write failed: ${e.message}`));
+      });
+    });
+  }
+
+  async _spawn() {
+    const cmd = await this.cmdProvider();
+    const child = spawn("sh", ["-c", cmd], { stdio: ["pipe", "pipe", "pipe"], detached: true });
+    this.child = child;
+    this.buf = "";
+    this.stderrTail = "";
+    let exited = false;
+    child.on("exit", () => (exited = true));
+    child._exitedFlag = () => exited;
+    child.stdin.on("error", () => {});
+    child.stderr.on("data", (d) => {
+      this.stderrTail = (this.stderrTail + d).slice(-2000); // bounded tail for error context
+    });
+    child.stdout.on("data", (d) => {
+      this.buf += d;
+      let nl;
+      while ((nl = this.buf.indexOf("\n")) >= 0) {
+        const line = this.buf.slice(0, nl).trim();
+        this.buf = this.buf.slice(nl + 1);
+        if (!line || !this.pendingResolve) continue;
+        try {
+          this.pendingResolve(null, JSON.parse(line));
+        } catch (e) {
+          this.pendingResolve(new Error(`unparseable envelope line from role command: ${e.message}`));
+        }
+      }
+    });
+    child.on("close", (code) => {
+      if (this.child === child) this.child = null;
+      if (this.pendingResolve) {
+        this.pendingResolve(
+          new Error(`role command exited ${code}${this.stderrTail.trim() ? `: ${this.stderrTail.trim().split("\n").pop()}` : ""}`)
+        );
+      }
+    });
+    child.on("error", (e) => {
+      if (this.child === child) this.child = null;
+      if (this.pendingResolve) this.pendingResolve(new Error(`spawn failed: ${e.message}`));
+    });
+  }
+
+  _kill() {
+    const child = this.child;
+    this.child = null;
+    if (!child) return;
+    // Same recycled-pgid guard as callHandlerProcess: never signal a reaped group.
+    if (!(child._exitedFlag && child._exitedFlag())) {
+      try {
+        process.kill(-child.pid, "SIGKILL");
+      } catch (e) {
+        if (e.code !== "ESRCH") {
+          process.stderr.write(`PersistentRoleClient: could not kill process group ${child.pid}: ${e.message}\n`);
+        }
+      }
+    }
+  }
+}
+
+/** Whether arena role calls hold one session per participant (#19, default ON -- the image pins
+ *  ct-agent v0.4.9+ which speaks the envelope contract). SORT_PERSISTENT_CALLS=0 opts back into
+ *  the historical one-shot-per-round model. */
+function persistentCallsEnabled() {
+  const v = (process.env.SORT_PERSISTENT_CALLS || "").trim();
+  return !(v === "0" || v.toLowerCase() === "false");
+}
+
+const persistentClients = new Map(); // stored cmd -> PersistentRoleClient (one per participant)
+
+/** The single role-call entry point the arena modes use: persistent session per participant by
+ *  default (#19), one-shot per round as the opt-out. Both paths re-apply freshenedCmd at spawn
+ *  time, so certs stay live either way. */
+function roleCall(storedCmd, input) {
+  if (!persistentCallsEnabled()) {
+    return freshenedCmd(storedCmd).then((cmd) => callHandlerProcess(cmd, input));
+  }
+  let client = persistentClients.get(storedCmd);
+  if (!client) {
+    client = new PersistentRoleClient(async () => `CT_CHANNEL_CALL_PERSISTENT=1 ${await freshenedCmd(storedCmd)}`);
+    persistentClients.set(storedCmd, client);
+  }
+  return client.call(input);
+}
+
 function randomArray(len) {
   const arr = Array.from({ length: len }, () => 1 + Math.floor(Math.random() * 99));
   return arr;
@@ -412,7 +563,7 @@ async function handleRun(req, res, participants, participantId, query) {
       you: config.you,
       initialArray,
       budget: resolveBudget(query),
-      callHandler: async (input) => callHandlerProcess(await freshenedCmd(config.cmd), input),
+      callHandler: (input) => roleCall(config.cmd, input),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
     sendNdjson(res, {
@@ -456,7 +607,7 @@ async function handleRace(req, res, participants, ids, query) {
 
   try {
     const result = await runRaceSession({
-      participants: chosen.map((c) => ({ you: c.you, callHandler: async (input) => callHandlerProcess(await freshenedCmd(c.cmd), input) })),
+      participants: chosen.map((c) => ({ you: c.you, callHandler: (input) => roleCall(c.cmd, input) })),
       initialArray,
       budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
@@ -488,7 +639,7 @@ async function handlePartition(req, res, participants, ids, query) {
 
   try {
     const segments = []; // filled in below, but participants need to know their own segment before the first round event
-    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: async (input) => callHandlerProcess(await freshenedCmd(c.cmd), input) }));
+    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: (input) => roleCall(c.cmd, input) }));
     // Compute segment boundaries the same way runPartitionSession will, purely so the "start"
     // event can tell the browser where each participant's slice sits before any rounds arrive.
     const base = Math.floor(initialArray.length / chosen.length);
@@ -1269,6 +1420,7 @@ module.exports = {
   listApprovedParticipants,
   removeApprovedParticipant,
   callHandlerProcess,
+  PersistentRoleClient,
   randomArray,
   handleRace,
   handlePartition,
