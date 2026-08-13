@@ -782,7 +782,11 @@ async function freshenedCmd(storedCmd) {
     /CT_CHANNEL_(?:FRONT_DOOR(?:_CERT|_ONLY)?|RELAY_GATE(?:_CERT)?)=\S+\s+/g,
     ""
   );
-  const liveCert = await edgeCertHex();
+  // Same "skip the round-trip when it can't matter" discipline as automateApproval: this runs on
+  // EVERY invocation of a stored command (every round, for every approved participant), so an
+  // unconditional fetch here is a real per-round control-plane call in any deployment that
+  // hasn't configured a front door at all, not just a one-time cost.
+  const liveCert = process.env.SORT_CHANNEL_FRONT_DOOR ? await edgeCertHex() : null;
   const frontDoorEnv =
     process.env.SORT_CHANNEL_FRONT_DOOR && liveCert
       ? `CT_CHANNEL_FRONT_DOOR=${process.env.SORT_CHANNEL_FRONT_DOOR} CT_CHANNEL_FRONT_DOOR_CERT=${liveCert} CT_CHANNEL_FRONT_DOOR_ONLY=1 `
@@ -793,8 +797,10 @@ async function freshenedCmd(storedCmd) {
   // are unreachable from outside (re-measured by the tester: both FAIL, :443 OK), so without
   // the gate the bridge's dialer walked direct -> front-door -> boring-alpn and was refused on
   // every rung ("edge broker refused the channel join") while the participant's gate-side half
-  // stood ready. Same live /pki/ca trust anchor as the front door.
-  const relayGate = await relayGateAddr();
+  // stood ready. Same live /pki/ca trust anchor as the front door. Gated on liveCert (and thus
+  // SORT_CHANNEL_FRONT_DOOR) same as relayGateEnv itself requires -- no deployment shape needs
+  // this fetched without a front door configured.
+  const relayGate = liveCert ? await relayGateAddr() : null;
   const relayGateEnv =
     relayGate && liveCert ? `CT_CHANNEL_RELAY_GATE=${relayGate} CT_CHANNEL_RELAY_GATE_CERT=${liveCert} ` : "";
   // Shell env-assignment prefixes are position-independent as long as they precede the command
@@ -900,7 +906,10 @@ async function automateApproval(pending) {
   // refused on every rung while the participant's gate side stood ready. Note freshenedCmd()
   // re-injects both the front-door AND relay-gate tokens at every call anyway (stored cmds must
   // survive CA reissues), so this baked copy is documentation-plus-defense, not the live value.
-  const relayGate = await relayGateAddr();
+  // Same "skip the round-trip when it can't matter" discipline as liveCert above -- relayGateEnv
+  // below is gated on liveCert (and thus on SORT_CHANNEL_FRONT_DOOR) anyway, so there's no
+  // deployment shape where fetching this without a front door configured would ever be used.
+  const relayGate = liveCert ? await relayGateAddr() : null;
   const relayGateEnv =
     relayGate && liveCert ? `CT_CHANNEL_RELAY_GATE=${relayGate} CT_CHANNEL_RELAY_GATE_CERT=${liveCert} ` : "";
   const cmd =
