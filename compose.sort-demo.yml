@@ -42,6 +42,11 @@ services:
       # redeploy between approval and the participant's status poll can't strand a grant
       # (CADS-DEMO-sort#26). Must be on sort_demo_waiting_room, like the two files above.
       - SORT_PENDING_GRANTS_FILE=/var/lib/sort-demo/pending-grants.json
+      # Self-service liveness sweep (CADS-DEMO-sort#28): a self-service participant whose ct-agent
+      # hasn't connected within this TTL is pruned from the roster and must re-join. Defaults shown
+      # (24h TTL, hourly sweep); operator-curated base participants are never swept.
+      - SORT_PARTICIPANT_TTL_MS=${SORT_PARTICIPANT_TTL_MS:-86400000}
+      - SORT_PARTICIPANT_SWEEP_INTERVAL_MS=${SORT_PARTICIPANT_SWEEP_INTERVAL_MS:-3600000}
       # This deployment's own Agent-Fabric channel identity, public halves only (see
       # docs/onboarding.md / GET /api/channel-info) -- mint once with `ct-agent channel init`.
       - SORT_CHANNEL_OPERATOR_PUBKEY=${SORT_CHANNEL_OPERATOR_PUBKEY:-}

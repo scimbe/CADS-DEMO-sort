@@ -119,10 +119,40 @@ function writeJsonFileAtomic(path, value) {
   fs.renameSync(tmp, path);
 }
 
+// ---- Self-service participant liveness (CADS-DEMO-sort#28) ------------------------------------
+//
+// The self-service roster used to grow without bound: every join added an approved-file entry that
+// only ever left by an explicit admin revoke, so dead throwaway/test participants (whose ct-agent
+// is long gone) piled up in GET /participants forever. The operator's rule: a self-service
+// participant whose ct-agent hasn't actually connected within SORT_PARTICIPANT_TTL_MS (default 24h)
+// is pruned and must re-join (the login-is-approval flow makes that a one-step action). "Connected"
+// is observed passively from real dials -- a successful roleCall means that participant's ct-agent
+// answered -- plus approval itself (they were online to join); there is no active probing, so a
+// dead entry simply ages out while a live one keeps refreshing its own timestamp. Operator-curated
+// BASE-file participants are never touched here (reconcile only ever reads the approved file), so
+// reference-sorter and friends can never be swept.
+const PARTICIPANT_TTL_MS = Number(process.env.SORT_PARTICIPANT_TTL_MS) || 24 * 60 * 60 * 1000;
+const PARTICIPANT_SWEEP_INTERVAL_MS =
+  Number(process.env.SORT_PARTICIPANT_SWEEP_INTERVAL_MS) || 60 * 60 * 1000;
+
+// you -> ms epoch of the last observed connection. In-memory and O(1) to update (a real round
+// updates it per successful dial, so it must be cheap); durability is the approved file's own
+// lastSeenAt, flushed by reconcileApprovedParticipants. Seeded from that file at boot in main().
+const participantLastSeen = new Map();
+function recordParticipantSeen(you, now = Date.now()) {
+  participantLastSeen.set(you, now);
+}
+// Test-only: clear the in-memory liveness map so cases don't leak "seen" state into each other.
+function resetParticipantSeenForTests() {
+  participantLastSeen.clear();
+}
+
 /** Append (or replace, by id) one entry into SORT_PARTICIPANTS_APPROVED_FILE and make it live on
  *  the already-running bridge immediately -- `participants` is a Map held by reference in every
  *  request handler (see main()), so `.set()` here is visible on the very next request, no restart
- *  needed. The file write is what makes a restart durable: main() reloads both files on boot. */
+ *  needed. The file write is what makes a restart durable: main() reloads both files on boot.
+ *  Stamps lastSeenAt at approval time -- being admitted counts as a connection, so a freshly
+ *  approved participant gets a full TTL window before the liveness sweep can consider it (#28). */
 function addApprovedParticipant(participants, entry) {
   const approvedPath = process.env.SORT_PARTICIPANTS_APPROVED_FILE;
   if (!approvedPath) throw new Error("SORT_PARTICIPANTS_APPROVED_FILE is not configured");
@@ -135,10 +165,12 @@ function addApprovedParticipant(participants, entry) {
       existing = [];
     }
   }
-  const next = existing.filter((p) => p && p.you !== entry.you);
-  next.push(entry);
+  const stamped = { ...entry, lastSeenAt: typeof entry.lastSeenAt === "number" ? entry.lastSeenAt : Date.now() };
+  const next = existing.filter((p) => p && p.you !== stamped.you);
+  next.push(stamped);
   writeJsonFileAtomic(approvedPath, next);
-  participants.set(entry.you, entry);
+  participants.set(stamped.you, stamped);
+  recordParticipantSeen(stamped.you, stamped.lastSeenAt);
 }
 
 /** The current contents of SORT_PARTICIPANTS_APPROVED_FILE -- deliberately only that file, never
@@ -168,10 +200,17 @@ function removeApprovedParticipant(participants, you) {
   if (!existing.some((p) => p && p.you === you)) return false;
   const next = existing.filter((p) => p && p.you !== you);
   writeJsonFileAtomic(approvedPath, next);
-  // Only delete from the live Map if the base file doesn't ALSO define this id -- an operator
-  // could plausibly have both (approved-file entry overriding a base one, per loadParticipants'
-  // own precedence), and revoking the approved one should fall back to the base entry, not wipe
-  // the participant off the live roster entirely if the operator still wants it there.
+  applyBaseFallbackToMap(participants, you);
+  return true;
+}
+
+/** Update the live Map after an approved-file entry for `you` has been dropped: only delete it if
+ *  the base file doesn't ALSO define this id -- an operator could plausibly have both (approved
+ *  entry overriding a base one, per loadParticipants' own precedence), and dropping the approved
+ *  one should fall back to the base entry, not wipe the participant off the live roster entirely if
+ *  the operator still wants it there. Map-only (no file I/O), so callers that already rewrote the
+ *  approved file in bulk (the liveness sweep) can reconcile the Map without a second write. */
+function applyBaseFallbackToMap(participants, you) {
   const base = parseParticipantsJson(
     process.env.SORT_PARTICIPANTS_JSON ||
       (process.env.SORT_PARTICIPANTS_FILE && fs.existsSync(process.env.SORT_PARTICIPANTS_FILE)
@@ -181,7 +220,38 @@ function removeApprovedParticipant(participants, you) {
   );
   if (base.has(you)) participants.set(you, base.get(you));
   else participants.delete(you);
-  return true;
+}
+
+/** The liveness sweep (CADS-DEMO-sort#28). Rewrites SORT_PARTICIPANTS_APPROVED_FILE in one atomic
+ *  pass: every self-service entry whose last observed connection is older than ttlMs is dropped
+ *  (and reconciled out of the live Map), every survivor is kept with its lastSeenAt flushed from
+ *  the in-memory map so a restart remembers it. Base-file participants are never considered -- this
+ *  only ever reads the approved file. `now`/`ttlMs`/`bootTime`/`lastSeen` are injectable so the
+ *  behavior is unit-testable without wall-clock or the module-level map. A legacy entry that
+ *  predates this feature (no lastSeenAt, never touched) falls back to bootTime, i.e. gets a full
+ *  fresh TTL window from the deploy rather than being deleted out from under a live participant. */
+function reconcileApprovedParticipants(
+  participants,
+  { now = Date.now(), ttlMs = PARTICIPANT_TTL_MS, bootTime = now, lastSeen = participantLastSeen } = {}
+) {
+  const approvedPath = process.env.SORT_PARTICIPANTS_APPROVED_FILE;
+  if (!approvedPath) return { pruned: [], kept: [] };
+  const list = listApprovedParticipants();
+  const byId = new Map(list.filter((e) => e && typeof e.you === "string").map((e) => [e.you, e]));
+  const kept = [];
+  const pruned = [];
+  for (const entry of list) {
+    if (!entry || typeof entry.you !== "string") continue; // drop malformed lines silently
+    const seen = lastSeen.get(entry.you) ?? entry.lastSeenAt ?? bootTime;
+    if (now - seen > ttlMs) pruned.push(entry.you);
+    else kept.push({ ...entry, lastSeenAt: seen });
+  }
+  const timestampsChanged = kept.some((e) => (byId.get(e.you) || {}).lastSeenAt !== e.lastSeenAt);
+  if (pruned.length > 0 || timestampsChanged || kept.length !== list.length) {
+    writeJsonFileAtomic(approvedPath, kept);
+  }
+  for (const you of pruned) applyBaseFallbackToMap(participants, you);
+  return { pruned, kept };
 }
 
 // ---- Waiting room: admin auth ----------------------------------------------------------------
@@ -671,6 +741,21 @@ function jsonError(res, status, message) {
   res.end(JSON.stringify({ error: message }));
 }
 
+/** Wrap a participant's per-round dial so that a SUCCESSFUL roleCall (the participant's ct-agent
+ *  actually answered) refreshes its liveness timestamp (CADS-DEMO-sort#28). A rejected dial (dial
+ *  timeout / connection failure -- "no connection") deliberately does NOT touch the timestamp, so a
+ *  participant whose ct-agent has gone away ages out. Harmless for base-file participants: the
+ *  liveness sweep only ever considers approved-file ids, so recording a base id just no-ops there.
+ *  A round even reaching the handler with a fault still counts as a connection -- the ct-agent was
+ *  reachable, which is exactly what the operator's rule is about, not per-move correctness. */
+function seenRecordingCall(you, cmd) {
+  return (input) =>
+    roleCall(cmd, input).then((r) => {
+      recordParticipantSeen(you);
+      return r;
+    });
+}
+
 async function handleRun(req, res, participants, participantId, query) {
   const config = participants.get(participantId);
   if (!config) return jsonError(res, 404, `unknown participant "${participantId}"`);
@@ -689,7 +774,7 @@ async function handleRun(req, res, participants, participantId, query) {
       you: config.you,
       initialArray,
       budget: resolveBudget(query),
-      callHandler: (input) => roleCall(config.cmd, input),
+      callHandler: seenRecordingCall(config.you, config.cmd),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
     });
     sendNdjson(res, {
@@ -739,7 +824,7 @@ async function handleRace(req, res, participants, ids, query) {
 
   try {
     const result = await runRaceSession({
-      participants: chosen.map((c) => ({ you: c.you, callHandler: (input) => roleCall(c.cmd, input) })),
+      participants: chosen.map((c) => ({ you: c.you, callHandler: seenRecordingCall(c.you, c.cmd) })),
       initialArray,
       budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
@@ -771,7 +856,7 @@ async function handlePartition(req, res, participants, ids, query) {
 
   try {
     const segments = []; // filled in below, but participants need to know their own segment before the first round event
-    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: (input) => roleCall(c.cmd, input) }));
+    const chosenWithHandlers = chosen.map((c) => ({ you: c.you, callHandler: seenRecordingCall(c.you, c.cmd) }));
     // Compute segment boundaries the same way runPartitionSession will, purely so the "start"
     // event can tell the browser where each participant's slice sits before any rounds arrive.
     const base = Math.floor(initialArray.length / chosen.length);
@@ -1664,6 +1749,36 @@ function main() {
     }
     jsonError(res, 404, "not found");
   });
+  // Self-service liveness (CADS-DEMO-sort#28): seed the in-memory last-seen map from the approved
+  // file's persisted timestamps, then reconcile once at boot and on a fixed interval. bootTime is
+  // captured once so legacy entries (no lastSeenAt) get a single full-TTL grace window from this
+  // start, not repeatedly. unref() so the timer never by itself keeps the process alive.
+  const bootTime = Date.now();
+  for (const entry of listApprovedParticipants()) {
+    if (entry && typeof entry.you === "string" && typeof entry.lastSeenAt === "number") {
+      recordParticipantSeen(entry.you, entry.lastSeenAt);
+    }
+  }
+  try {
+    reconcileApprovedParticipants(participants, { bootTime });
+  } catch (e) {
+    process.stderr.write(`participant-sweep: initial reconcile failed: ${e.message}\n`);
+  }
+  const sweepTimer = setInterval(() => {
+    try {
+      const { pruned } = reconcileApprovedParticipants(participants, { bootTime });
+      if (pruned.length) {
+        process.stderr.write(
+          `participant-sweep: pruned ${pruned.length} stale self-service participant(s) ` +
+            `(no connection in >${PARTICIPANT_TTL_MS}ms): ${pruned.join(", ")}\n`
+        );
+      }
+    } catch (e) {
+      process.stderr.write(`participant-sweep: failed: ${e.message}\n`);
+    }
+  }, PARTICIPANT_SWEEP_INTERVAL_MS);
+  if (typeof sweepTimer.unref === "function") sweepTimer.unref();
+
   const [host, port] = LISTEN.split(":");
   server.listen(Number(port), host, () => {
     process.stdout.write(`sort-arena-bridge listening on ${LISTEN}, ${participants.size} participant(s) configured\n`);
@@ -1678,6 +1793,11 @@ module.exports = {
   addApprovedParticipant,
   listApprovedParticipants,
   removeApprovedParticipant,
+  applyBaseFallbackToMap,
+  reconcileApprovedParticipants,
+  recordParticipantSeen,
+  resetParticipantSeenForTests,
+  PARTICIPANT_TTL_MS,
   callHandlerProcess,
   PersistentRoleClient,
   randomArray,

@@ -139,7 +139,12 @@ test("addApprovedParticipant: appends to the approved file and makes the entry l
     addApprovedParticipant(participants, { you: "new-one", label: "New One", cmd: "echo new" });
     assert.equal(participants.get("new-one").cmd, "echo new");
     const onDisk = JSON.parse(fs.readFileSync(approvedFile, "utf8"));
-    assert.deepEqual(onDisk, [{ you: "new-one", label: "New One", cmd: "echo new" }]);
+    assert.equal(onDisk.length, 1);
+    // The core fields persist verbatim; lastSeenAt is additionally stamped at approval time (#28).
+    assert.equal(onDisk[0].you, "new-one");
+    assert.equal(onDisk[0].label, "New One");
+    assert.equal(onDisk[0].cmd, "echo new");
+    assert.equal(typeof onDisk[0].lastSeenAt, "number");
 
     // Replacing an existing id updates in place rather than appending a duplicate row.
     addApprovedParticipant(participants, { you: "new-one", label: "New One", cmd: "echo updated" });
@@ -595,6 +600,111 @@ test("loadPendingGrants: a missing or malformed file degrades to an empty Map, n
     delete require.cache[require.resolve("./server.js")];
     const { loadPendingGrants } = require("./server.js");
     assert.equal(loadPendingGrants().size, 0, "corrupt file -> empty, not a crash");
+  });
+});
+
+// --- Self-service liveness sweep (CADS-DEMO-sort#28: roster must not fill with dead participants) -
+
+function seedApprovedFile(entries) {
+  const file = tmpFile("participants-approved.json");
+  fs.writeFileSync(file, JSON.stringify(entries));
+  return file;
+}
+
+test("reconcileApprovedParticipants: prunes a self-service entry with no connection in >TTL, keeps a fresh one", async () => {
+  const now = 1_000_000_000_000;
+  const ttlMs = 24 * 60 * 60 * 1000;
+  const file = seedApprovedFile([
+    { you: "dead-test", label: "dead", cmd: "x", lastSeenAt: now - ttlMs - 1 },
+    { you: "live-one", label: "live", cmd: "y", lastSeenAt: now - 60_000 },
+  ]);
+  await withEnv({ SORT_PARTICIPANTS_APPROVED_FILE: file, SORT_PARTICIPANTS_FILE: "" }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { reconcileApprovedParticipants } = require("./server.js");
+    const participants = new Map([
+      ["dead-test", { you: "dead-test", label: "dead", cmd: "x" }],
+      ["live-one", { you: "live-one", label: "live", cmd: "y" }],
+    ]);
+    const { pruned, kept } = reconcileApprovedParticipants(participants, { now, ttlMs, lastSeen: new Map() });
+    assert.deepEqual(pruned, ["dead-test"], "the stale entry is pruned");
+    assert.equal(participants.has("dead-test"), false, "and removed from the live roster Map");
+    assert.equal(participants.has("live-one"), true, "the fresh entry stays live");
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.deepEqual(onDisk.map((e) => e.you), ["live-one"], "the approved file no longer lists the dead one");
+    assert.equal(kept.length, 1);
+  });
+});
+
+test("reconcileApprovedParticipants: a recorded connection refreshes liveness so an otherwise-stale entry survives", async () => {
+  const now = 1_000_000_000_000;
+  const ttlMs = 24 * 60 * 60 * 1000;
+  const file = seedApprovedFile([{ you: "p1", label: "p1", cmd: "x", lastSeenAt: now - ttlMs - 1 }]);
+  await withEnv({ SORT_PARTICIPANTS_APPROVED_FILE: file, SORT_PARTICIPANTS_FILE: "" }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { reconcileApprovedParticipants } = require("./server.js");
+    const participants = new Map([["p1", { you: "p1", label: "p1", cmd: "x" }]]);
+    // A real dial just landed: the in-memory map says p1 connected 30s ago, overriding the stale
+    // file timestamp -- exactly what seenRecordingCall does on a successful roleCall.
+    const { pruned } = reconcileApprovedParticipants(participants, { now, ttlMs, lastSeen: new Map([["p1", now - 30_000]]) });
+    assert.deepEqual(pruned, [], "a freshly-seen participant is not pruned");
+    assert.equal(participants.has("p1"), true);
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(onDisk[0].lastSeenAt, now - 30_000, "the refreshed timestamp is flushed to disk for restart-durability");
+  });
+});
+
+test("reconcileApprovedParticipants: never touches a base-file participant; a pruned-but-also-base id falls back to base", async () => {
+  const now = 1_000_000_000_000;
+  const ttlMs = 24 * 60 * 60 * 1000;
+  // 'overridden' is stale in the approved file BUT also defined in the operator's base file.
+  const baseFile = tmpFile("participants-base.json");
+  fs.writeFileSync(baseFile, JSON.stringify([
+    { you: "reference-sorter", label: "Reference", cmd: "ref" },
+    { you: "overridden", label: "Base version", cmd: "base-cmd" },
+  ]));
+  const approvedFile = seedApprovedFile([
+    { you: "overridden", label: "Self-service override", cmd: "ss-cmd", lastSeenAt: now - ttlMs - 1 },
+  ]);
+  await withEnv({ SORT_PARTICIPANTS_APPROVED_FILE: approvedFile, SORT_PARTICIPANTS_FILE: baseFile, SORT_PARTICIPANTS_JSON: "" }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { reconcileApprovedParticipants } = require("./server.js");
+    const participants = new Map([
+      ["reference-sorter", { you: "reference-sorter", label: "Reference", cmd: "ref" }],
+      ["overridden", { you: "overridden", label: "Self-service override", cmd: "ss-cmd" }],
+    ]);
+    const { pruned } = reconcileApprovedParticipants(participants, { now, ttlMs, lastSeen: new Map() });
+    assert.deepEqual(pruned, ["overridden"], "only the approved-file override is pruned");
+    assert.equal(participants.has("reference-sorter"), true, "the base-only participant is never even considered");
+    assert.equal(participants.get("overridden").cmd, "base-cmd", "pruning the override falls back to the base entry, not deletion");
+  });
+});
+
+test("reconcileApprovedParticipants: a legacy entry with no lastSeenAt gets a full-TTL grace window from bootTime, not deleted", async () => {
+  const now = 1_000_000_000_000;
+  const ttlMs = 24 * 60 * 60 * 1000;
+  const file = seedApprovedFile([{ you: "legacy", label: "legacy", cmd: "x" }]); // no lastSeenAt
+  await withEnv({ SORT_PARTICIPANTS_APPROVED_FILE: file, SORT_PARTICIPANTS_FILE: "" }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { reconcileApprovedParticipants } = require("./server.js");
+    const participants = new Map([["legacy", { you: "legacy", label: "legacy", cmd: "x" }]]);
+    const { pruned } = reconcileApprovedParticipants(participants, { now, ttlMs, bootTime: now, lastSeen: new Map() });
+    assert.deepEqual(pruned, [], "legacy entry survives the boot sweep");
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(onDisk[0].lastSeenAt, now, "and is stamped with bootTime so it ages from the deploy, not forever");
+  });
+});
+
+test("addApprovedParticipant: stamps lastSeenAt at approval time (approval counts as a connection)", async () => {
+  const file = tmpFile("participants-approved.json");
+  await withEnv({ SORT_PARTICIPANTS_APPROVED_FILE: file }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { addApprovedParticipant, resetParticipantSeenForTests } = require("./server.js");
+    resetParticipantSeenForTests();
+    const participants = new Map();
+    addApprovedParticipant(participants, { you: "fresh", label: "fresh", cmd: "z" });
+    const onDisk = JSON.parse(fs.readFileSync(file, "utf8"));
+    assert.equal(onDisk.length, 1);
+    assert.equal(typeof onDisk[0].lastSeenAt, "number", "a lastSeenAt is stamped so the sweep gives it a full TTL window");
   });
 });
 
