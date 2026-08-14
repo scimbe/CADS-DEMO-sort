@@ -545,6 +545,52 @@ test("currentOidcToken: falls back to the static SORT_OIDC_TOKEN when no live se
   });
 });
 
+test("ensureServiceOidcToken: mints via client_credentials, caches it, and currentOidcToken prefers it (sort#9 durable tier)", async () => {
+  // The durable auth tier: a client_credentials grant that survives redeploys, no human re-arm.
+  // Stub issuer that returns a real token JSON for a client_credentials POST and records the grant.
+  let grantsSeen = [];
+  const issuer = require("node:http").createServer((req, res) => {
+    let b = "";
+    req.on("data", (c) => (b += c));
+    req.on("end", () => {
+      const params = new URLSearchParams(b);
+      grantsSeen.push(params.get("grant_type"));
+      if (params.get("grant_type") === "client_credentials" && params.get("client_secret") === "s3cr3t") {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ access_token: "svc-token-xyz", expires_in: 300 }));
+      } else {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "invalid_client" }));
+      }
+    });
+  });
+  await new Promise((r) => issuer.listen(0, "127.0.0.1", r));
+  const issuerBase = `http://127.0.0.1:${issuer.address().port}/realms/ct-demo`;
+  try {
+    await withEnv(
+      {
+        SORT_OIDC_ISSUER_BASE: issuerBase,
+        SORT_OIDC_CLIENT_ID: "sort-bridge-automation",
+        SORT_OIDC_CLIENT_SECRET: "s3cr3t",
+        SORT_OIDC_TOKEN: "static-should-not-win",
+      },
+      async () => {
+        delete require.cache[require.resolve("./server.js")];
+        const { ensureServiceOidcToken, currentOidcToken, automationConfigured, resetOidcSessionForTests } = require("./server.js");
+        resetOidcSessionForTests();
+        const t = await ensureServiceOidcToken();
+        assert.equal(t, "svc-token-xyz", "minted the service token via client_credentials");
+        assert.equal(currentOidcToken(), "svc-token-xyz", "the service token wins over the static fallback");
+        // A second call must reuse the cache, not re-grant.
+        await ensureServiceOidcToken();
+        assert.equal(grantsSeen.filter((g) => g === "client_credentials").length, 1, "second call reused the cache");
+      }
+    );
+  } finally {
+    await new Promise((r) => issuer.close(r));
+  }
+});
+
 test("handleOidcSessionSubmit: fails closed (503) when SORT_ADMIN_EMAILS is unset", async () => {
   await withEnv({ SORT_ADMIN_EMAILS: "" }, async () => {
     delete require.cache[require.resolve("./server.js")];

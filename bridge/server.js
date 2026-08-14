@@ -806,18 +806,70 @@ function readSecret(name) {
 let liveOidcSession = null; // {accessToken, accessExpiresAt, refreshToken, sessionDeadline}
 let oidcRefreshTimer = null;
 
+// Service-account (client_credentials) token cache -- the DURABLE auth tier (sort#9): a
+// confidential Keycloak client whose secret is mounted at SORT_OIDC_CLIENT_SECRET_FILE. Unlike
+// the admin.html browser session (in-memory, wiped on every bridge redeploy -- the recurring
+// "approvals silently break after a deploy" incident), this survives restarts because the bridge
+// re-mints on demand from the mounted secret, no human re-arm and no refresh token. Preferred
+// over both the browser session and the static SORT_OIDC_TOKEN when configured.
+let serviceOidcToken = null; // {token, expiresAt}
+
+function serviceClientSecret() {
+  return readSecret("SORT_OIDC_CLIENT_SECRET"); // reads the _FILE variant transparently
+}
+
+/** Mint (or return a still-valid cached) service-account access token via client_credentials.
+ *  Async; callers that need a token synchronously fall back through currentOidcToken(). Caches
+ *  with a 30s safety margin before the real expiry so an in-flight cpFetch never races expiry. */
+async function ensureServiceOidcToken() {
+  const secret = serviceClientSecret();
+  const issuerBase = process.env.SORT_OIDC_ISSUER_BASE;
+  if (!secret || !issuerBase) return null;
+  if (serviceOidcToken && serviceOidcToken.expiresAt - 30_000 > Date.now()) return serviceOidcToken.token;
+  const resp = await fetch(`${issuerBase.replace(/\/$/, "")}/protocol/openid-connect/token`, {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: process.env.SORT_OIDC_CLIENT_ID || "sort-bridge-automation",
+      client_secret: secret,
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => "");
+    throw new Error(`client_credentials grant failed: HTTP ${resp.status} ${text.slice(0, 200)}`);
+  }
+  const body = await resp.json();
+  serviceOidcToken = {
+    token: body.access_token,
+    expiresAt: Date.now() + Math.max(30, Number(body.expires_in) || 0) * 1000,
+  };
+  return serviceOidcToken.token;
+}
+
 function currentOidcToken() {
+  // Prefer the durable service token when it's cached and valid; then the browser session; then
+  // the static fallback. ensureServiceOidcToken() (async) is what keeps the first branch fresh --
+  // cpFetch awaits it before every CP call, so by the time this sync getter runs the cache is warm.
+  if (serviceOidcToken && serviceOidcToken.expiresAt - 30_000 > Date.now()) return serviceOidcToken.token;
   if (liveOidcSession && liveOidcSession.accessExpiresAt > Date.now()) return liveOidcSession.accessToken;
   return readSecret("SORT_OIDC_TOKEN");
 }
 
 function automationConfigured() {
+  // A configured service-account secret counts as an available token even before the first
+  // cpFetch has warmed the cache -- otherwise automation reports "not configured" at boot until
+  // something happens to mint a token, exactly the false-negative that made a redeploy look like
+  // it had lost automation. currentOidcToken() covers the session/static tiers.
+  const haveTokenSource = Boolean(
+    (serviceClientSecret() && process.env.SORT_OIDC_ISSUER_BASE) || currentOidcToken()
+  );
   return Boolean(
     readSecret("SORT_CHANNEL_OPERATOR_KEY") &&
       readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY") &&
       readSecret("SORT_CHANNEL_BRIDGE_NOISE_KEY") &&
       process.env.SORT_CP_URL &&
-      currentOidcToken() &&
+      haveTokenSource &&
       process.env.SORT_CHANNEL_BROKER &&
       process.env.SORT_CHANNEL_RELAY
   );
@@ -1057,6 +1109,13 @@ async function freshenedCmd(storedCmd) {
 }
 
 async function cpFetch(path, body) {
+  // Warm the durable service token first (no-op when the client secret isn't configured), so
+  // currentOidcToken() below returns it rather than a wiped session or a stale static token.
+  try {
+    await ensureServiceOidcToken();
+  } catch (e) {
+    process.stderr.write(`cpFetch: service token mint failed, falling back: ${e.message}\n`);
+  }
   const token = currentOidcToken();
   const resp = await fetch(`${process.env.SORT_CP_URL}${path}`, {
     method: "POST",
@@ -1603,6 +1662,8 @@ module.exports = {
   cpFetch,
   automateApproval,
   currentOidcToken,
+  ensureServiceOidcToken,
+  automationConfigured,
   handleOidcSessionSubmit,
   refreshOidcToken,
   // Test-only: liveOidcSession/oidcRefreshTimer are deliberately module-level (a real bridge
