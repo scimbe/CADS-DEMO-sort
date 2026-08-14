@@ -65,7 +65,25 @@ if os.environ["config_hash"]:
     entry["config_hash"] = os.environ["config_hash"]
 if os.environ["backfilled"] == "true":
     entry["backfilled"] = True
-with open(sys.argv[1], "a") as f:
-    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+path = sys.argv[1]
+# Guard against concatenating onto a line that lacks its trailing newline (a prior truncated
+# write / hand edit): otherwise the next append produces `{...}{...}` on one physical line, which
+# the generator can't parse. Prepend a newline only when the file is non-empty and doesn't end in
+# one -- never corrupt the ledger, the whole point of this helper.
+prefix = ""
+if os.path.exists(path) and os.path.getsize(path) > 0:
+    with open(path, "rb") as f:
+        f.seek(-1, os.SEEK_END)
+        if f.read(1) != b"\n":
+            prefix = "\n"
+with open(path, "a") as f:
+    f.write(prefix + json.dumps(entry, ensure_ascii=False) + "\n")
 print(f"ledger-append: recorded {entry['component']} -> {entry['artifact']}")
 PY
+
+# Finding 4: keep STATUS.md in lockstep with the ledger -- regenerate it after every append so
+# the committed snapshot never lags the data it summarizes. Best-effort: a generator failure must
+# not fail the append that already succeeded.
+if [ -x "$HERE/generate-status.py" ] || [ -f "$HERE/generate-status.py" ]; then
+  python3 "$HERE/generate-status.py" >/dev/null 2>&1 || echo "ledger-append: note -- STATUS.md regen failed; run ops/generate-status.py by hand" >&2
+fi
