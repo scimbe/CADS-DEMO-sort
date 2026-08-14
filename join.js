@@ -261,6 +261,22 @@ function renderApproved(channel, grant) {
     `CT_AGENT_SERVICES=text_generation \\\n` +
     `  ct-agent channel`;
   identityBox.appendChild(pre);
+
+  // CADS-DEMO-sort#27: name the ct-agent minimum version right where the serve command is, not
+  // only in the docs how-tos. An older binary hits the CADS-Tunnel#494 ack-deadlock -- 45-100s
+  // stall on the first pairing after every start -- which looks like a broken setup and gets
+  // reported as a bug. This is the surface every participant actually uses, so the requirement
+  // belongs here. Links open in a new tab; the grant/keys above live in the page body, never in a
+  // URL, so rel=noopener leaks nothing.
+  const versionReq = document.createElement("p");
+  versionReq.className = "version-req";
+  versionReq.innerHTML =
+    'Requires <strong>ct-agent v0.4.16 or newer</strong> ' +
+    '(<a href="https://github.com/scimbe/ct-agent/releases" target="_blank" rel="noopener">releases</a>). ' +
+    'Older versions stall 45–100 s on their first pairing after every start ' +
+    '(<a href="https://github.com/scimbe/CADS-Tunnel/issues/494" target="_blank" rel="noopener">CADS-Tunnel#494</a>) ' +
+    '— that looks like a broken setup but isn’t.';
+  identityBox.appendChild(versionReq);
 }
 
 boot();
