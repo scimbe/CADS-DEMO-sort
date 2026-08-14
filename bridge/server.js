@@ -826,12 +826,16 @@ async function ensureServiceOidcToken() {
   const issuerBase = process.env.SORT_OIDC_ISSUER_BASE;
   if (!secret || !issuerBase) return null;
   if (serviceOidcToken && serviceOidcToken.expiresAt - 30_000 > Date.now()) return serviceOidcToken.token;
+  // Dedicated client id for the service tier -- deliberately NOT SORT_OIDC_CLIENT_ID (that one
+  // is the browser-session/refresh client, `admin-cli`). They are different Keycloak clients: a
+  // confidential client_credentials client here, the public browser client there. Sharing one
+  // env var would let overriding the service client id silently break browser-session refresh.
   const resp = await fetch(`${issuerBase.replace(/\/$/, "")}/protocol/openid-connect/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "client_credentials",
-      client_id: process.env.SORT_OIDC_CLIENT_ID || "sort-bridge-automation",
+      client_id: process.env.SORT_OIDC_SERVICE_CLIENT_ID || "sort-bridge-automation",
       client_secret: secret,
     }),
   });
@@ -989,13 +993,12 @@ function mintGrants(holderAHex, holderBHex) {
   });
 }
 
-/** POST to the control plane with a bearer token -- the simplest of CADS-webconference-demo's
- *  three auth tiers (service-account client_credentials preferred there; this deployment starts
- *  with the same manually-refreshed-token fallback tier, since standing up a service-account
- *  client is a real, separate operational step, not a code change). SORT_OIDC_TOKEN needs
- *  refreshing whenever it expires (a realm's default is typically minutes, not hours) -- until a
- *  service-account credential is wired in, that's a real operational limitation of Phase 2 worth
- *  documenting, not hiding. */
+/** POST to the control plane with a bearer token. Token source is the three-tier precedence in
+ *  currentOidcToken(): the durable service-account client_credentials tier
+ *  (SORT_OIDC_CLIENT_SECRET_FILE + SORT_OIDC_ISSUER_BASE, re-minted on demand -- survives
+ *  redeploys, no human re-arm), then the admin.html browser session (in-memory, wiped on
+ *  redeploy), then the static SORT_OIDC_TOKEN last resort. cpFetch warms the service token first
+ *  so it wins when configured. See docs/operations.md. */
 /** Is `s` a decodable hex-DER string (non-empty, even length, hex chars only)? The gate every
  *  outbound trust-anchor value must pass -- see edgeCertHex() for the incident that makes this
  *  non-negotiable. */
