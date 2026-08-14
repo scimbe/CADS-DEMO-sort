@@ -411,13 +411,55 @@ class PersistentRoleClient {
   /** `cmdProvider`: async () -> the full shell command to spawn. Injected (production passes the
    *  freshenedCmd + CT_CHANNEL_CALL_PERSISTENT prefix builder) so tests can substitute a stub
    *  process without a real ct-agent binary or edge. */
-  constructor(cmdProvider) {
+  constructor(cmdProvider, label = "role") {
     this.cmdProvider = cmdProvider;
+    this.label = label; // for log lines only -- never secrets, never the full cmd
     this.child = null;
     this.buf = "";
     this.stderrTail = "";
     this.pendingResolve = null; // FIFO depth 1 -- calls are serialized via `chain`
     this.chain = Promise.resolve();
+    // #25 proactive respawn (pre-warm): when the held session dies BETWEEN rounds (participant
+    // restart, edge blip), waiting for the next round call to notice costs that call a full
+    // dial+pair on top of its own budget -- measured live as a constant 60-100s round-1 latency
+    // (2-3 stacked 30s windows) vs 110ms on an intact session. ct-agent under
+    // CT_CHANNEL_CALL_PERSISTENT exits on session death, so the close handler below re-spawns
+    // immediately with exponential backoff (500ms..5s cap): by the time the next round call
+    // arrives, the fresh child has usually already dialed and paired. The backoff cap keeps a
+    // permanently-absent peer at a modest ~5s dial cadence instead of the #250 flap-storm class.
+    this.respawnDelayMs = 500;
+    this.respawnTimer = null;
+    this.spawnedAt = 0;
+    this.spawnInFlight = null; // shared so the timer and a concurrent call never double-spawn
+  }
+
+  _log(msg) {
+    process.stderr.write(`PersistentRoleClient[${this.label}] ${new Date().toISOString()} ${msg}\n`);
+  }
+
+  _scheduleRespawn(reason) {
+    if (this.respawnTimer || this.child) return;
+    const delay = this.respawnDelayMs;
+    this.respawnDelayMs = Math.min(this.respawnDelayMs * 2, 5000);
+    this._log(`scheduling proactive respawn in ${delay}ms (${reason})`);
+    this.respawnTimer = setTimeout(() => {
+      this.respawnTimer = null;
+      if (this.child) return; // a round call got there first
+      this._ensureChild().catch((e) => {
+        this._log(`proactive respawn failed: ${e.message}`);
+        this._scheduleRespawn("previous proactive respawn failed");
+      });
+    }, delay);
+    // Never hold the process open just for a pre-warm timer.
+    if (this.respawnTimer.unref) this.respawnTimer.unref();
+  }
+
+  _ensureChild() {
+    if (this.child) return Promise.resolve();
+    if (!this.spawnInFlight) {
+      this.spawnInFlight = this._spawn().finally(() => (this.spawnInFlight = null));
+    }
+    return this.spawnInFlight;
   }
 
   call(input, timeoutMs = TIMEOUT_MS) {
@@ -437,13 +479,14 @@ class PersistentRoleClient {
   }
 
   async _callOnce(input, timeoutMs) {
-    if (!this.child) await this._spawn();
+    await this._ensureChild();
     const child = this.child;
     return new Promise((resolve, reject) => {
       let settled = false;
       const timer = setTimeout(() => {
         if (settled) return;
         settled = true;
+        this._log(`call timed out after ${Math.round(timeoutMs / 1000)}s -- killing child pid ${child && child.pid}`);
         this._kill(); // a stuck call kills the whole child; the NEXT call respawns
         reject(new Error(`role command timed out after ${Math.round(timeoutMs / 1000)}s`));
       }, timeoutMs);
@@ -453,7 +496,10 @@ class PersistentRoleClient {
         clearTimeout(timer);
         this.pendingResolve = null;
         if (err) return reject(err);
-        if (envelope.ok) return resolve(String(envelope.output ?? ""));
+        if (envelope.ok) {
+          this.respawnDelayMs = 500; // a healthy session resets the pre-warm backoff
+          return resolve(String(envelope.output ?? ""));
+        }
         reject(new Error(`role command reported: ${envelope.error || "unknown error"}`));
       };
       child.stdin.write(JSON.stringify(input) + "\n", (e) => {
@@ -468,6 +514,8 @@ class PersistentRoleClient {
     this.child = child;
     this.buf = "";
     this.stderrTail = "";
+    this.spawnedAt = Date.now();
+    this._log(`spawned child pid ${child.pid}`);
     let exited = false;
     child.on("exit", () => (exited = true));
     child._exitedFlag = () => exited;
@@ -490,15 +538,24 @@ class PersistentRoleClient {
       }
     });
     child.on("close", (code) => {
-      if (this.child === child) this.child = null;
+      const lifeMs = Date.now() - this.spawnedAt;
+      const wasCurrent = this.child === child;
+      if (wasCurrent) this.child = null;
+      this._log(`child pid ${child.pid} closed (code ${code}) after ${Math.round(lifeMs / 1000)}s${this.pendingResolve ? " during an active call" : " while idle"}`);
       if (this.pendingResolve) {
         this.pendingResolve(
           new Error(`role command exited ${code}${this.stderrTail.trim() ? `: ${this.stderrTail.trim().split("\n").pop()}` : ""}`)
         );
+      } else if (wasCurrent) {
+        // #25: idle session death (participant restart / edge blip). Pre-warm a replacement NOW
+        // so the next round call lands on an already-paired session instead of paying dial+pair
+        // inside its own timeout budget.
+        this._scheduleRespawn(`idle session death, code ${code}`);
       }
     });
     child.on("error", (e) => {
       if (this.child === child) this.child = null;
+      this._log(`spawn error: ${e.message}`);
       if (this.pendingResolve) this.pendingResolve(new Error(`spawn failed: ${e.message}`));
     });
   }
@@ -558,7 +615,9 @@ function roleCall(storedCmd, input) {
   }
   let client = persistentClients.get(storedCmd);
   if (!client) {
-    client = new PersistentRoleClient(async () => `CT_CHANNEL_CALL_PERSISTENT=1 ${await freshenedCmd(storedCmd)}`);
+    // Label: a short cmd digest -- stable per participant, never leaks key material into logs.
+    const label = require("node:crypto").createHash("sha256").update(storedCmd).digest("hex").slice(0, 8);
+    client = new PersistentRoleClient(async () => `CT_CHANNEL_CALL_PERSISTENT=1 ${await freshenedCmd(storedCmd)}`, label);
     persistentClients.set(storedCmd, client);
   }
   return client.call(input);

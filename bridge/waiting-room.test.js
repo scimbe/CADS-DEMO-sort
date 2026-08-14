@@ -790,6 +790,34 @@ test("PersistentRoleClient: a dead child is respawned transparently and an error
   failing._kill();
 });
 
+test("PersistentRoleClient: an IDLE session death triggers a proactive pre-warm respawn (#25)", async () => {
+  // The sort#25 regression: a session dying BETWEEN rounds used to be discovered only by the
+  // next round call, which then paid the whole dial+pair inside its own timeout budget
+  // (measured live: 60-100s round-1 latency vs 110ms on an intact session). The fix pre-warms:
+  // the close handler schedules a respawn immediately, so a replacement child exists BEFORE any
+  // call arrives. Observable via spawn count: 2 spawns with ZERO calls in between.
+  const { PersistentRoleClient } = require("./server.js");
+  let spawns = 0;
+  // Stub: announces itself with a first envelope nobody consumes, then dies after 150ms --
+  // simulating ct-agent's exit-on-session-death. The client must respawn it unprompted.
+  const dieQuick =
+    `node -e 'setTimeout(()=>process.exit(1),150);setInterval(()=>{},1000)'`;
+  const client = new PersistentRoleClient(async () => {
+    spawns += 1;
+    return dieQuick;
+  });
+  await client._ensureChild();
+  assert.equal(spawns, 1, "first spawn is explicit");
+  // Wait past the child's 150ms death + the 500ms initial pre-warm backoff.
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.ok(spawns >= 2, `close handler pre-warmed a replacement with no call in flight (spawns=${spawns})`);
+  // Backoff must grow (500 -> 1000 -> ...) rather than hot-loop -- the #250 storm class.
+  assert.ok(client.respawnDelayMs > 500, `respawn backoff grew (now ${client.respawnDelayMs}ms)`);
+  assert.ok(spawns <= 4, `backoff kept the respawn cadence modest over ~1.2s (spawns=${spawns})`);
+  if (client.respawnTimer) clearTimeout(client.respawnTimer);
+  client._kill();
+});
+
 test("callHandlerProcess: a timeout kills the whole process group, not just the direct `sh` child", async (t) => {
   if (process.platform !== "linux") return t.skip("needs /proc to observe real process state");
   const { callHandlerProcess } = require("./server.js");
