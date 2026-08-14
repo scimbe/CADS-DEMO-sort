@@ -1295,11 +1295,22 @@
    renderSoloSelect();
    els.status.textContent = `${state.roster.length} participant(s) configured on the bridge.`;
   } catch (e) {
-   els.roster.innerHTML = "";
-   els.soloSelect.innerHTML = "";
-   els.soloSelect.append(new Option("bridge unreachable", ""));
-   state.soloParticipant = null;
-   syncButtons();
+   // CADS-DEMO-sort#22 ("Stop resets the participant selection"): once a roster HAS loaded,
+   // a failed re-poll must not wipe the pick. This branch used to null soloParticipant and
+   // replace the options with "bridge unreachable" on EVERY failure, so one dropped 15s poll
+   // (the hosted tunnel flaps, see issue item 1) meant the next successful poll re-seeded the
+   // select from roster[0] — reference-sorter — and the user's next run silently used the
+   // wrong participant. Keep the last known roster and selection instead; the notice + status
+   // below still say the bridge is unreachable, and an actual run against a dead bridge fails
+   // loudly in run()'s own error path. The wipe now only applies before the FIRST successful
+   // load, where there is no selection to protect and the placeholder is the honest state.
+   if (!state.rosterLoaded) {
+    els.roster.innerHTML = "";
+    els.soloSelect.innerHTML = "";
+    els.soloSelect.append(new Option("bridge unreachable", ""));
+    state.soloParticipant = null;
+    syncButtons();
+   }
    els.notice.hidden = false;
    els.notice.innerHTML =
     "The bridge is not reachable from this page (<code>GET /participants</code> failed: " +
