@@ -1,18 +1,18 @@
 # Status -- sort arena (generated, do not hand-edit)
 
-Generated: `2026-08-14T11:57:27Z` by `ops/generate-status.py` from the deployment ledger, live probes, and the `state:` label family. Stale timestamps mean nobody ran the generator, not that nothing happened -- check the ledger's own tail when in doubt.
+Generated: `2026-08-14T12:08:40Z` by `ops/generate-status.py` from the deployment ledger, live probes, and the `state:` label family. Stale timestamps mean nobody ran the generator, not that nothing happened -- check the ledger's own tail when in doubt.
 
 ## Components (last ledger entry per component)
 
 | Component | Artifact | When | Verification |
 |---|---|---|---|
-| bridge | sort-demo-bridge:v0413-svcaccount @ dce63c6 | 2026-08-14T11:48:11Z | 82/82 tests incl. client_credentials grant test; local run finishedCorrectly; external 200; secret m |
+| bridge | sort-demo-bridge:v0415-svcaccount @ HEAD (ct-agent 0.4.15) | 2026-08-14T12:08:40Z | image ct-agent 0.4.15; local run finishedCorrectly; external 3/3 200; service-account tier intact |
 | ledger | ops/generate-status.py + STATUS.md snapshot @ HEAD | 2026-08-14T07:23:24Z | generated STATUS.md renders all three sources; live probe 200 |
 | origin-caddy | container recreate @ HEAD (Stop-button index.html fix live) | 2026-08-14T11:57:27Z | join.html 302 gate; index.html serves rosterLoaded guard (3 occurrences); participants 200 |
 
 ## Live probe
 
-- `https://sort.bunsenbrenner.org/participants`: probe failed to run (000)
+- `https://sort.bunsenbrenner.org/participants`: HTTP 200 -- OK
 
 ## Issues by state
 
