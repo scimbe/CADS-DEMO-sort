@@ -5,6 +5,7 @@ participants/*/generated/
 # to these relative paths when unset -- real bridge-written data, never source, never committed).
 /join-requests.json
 /participants-approved.json
+/pending-grants.json
 
 # ct-agent-wasm build output (build-wasm.sh) -- generated, not source, same as
 # CADS-webconference-demo's own /pkg/ gitignore entry.
@@ -17,3 +18,4 @@ participants/*/generated/
 # Same runtime state as /join-requests.json above, but written here when a bridge dev server
 # is run from inside bridge/ with a relative SORT_JOIN_REQUESTS_FILE path.
 /bridge/join-requests.json
+/bridge/pending-grants.json

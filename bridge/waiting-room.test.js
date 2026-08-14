@@ -12,6 +12,14 @@ const vectors = JSON.parse(
   fs.readFileSync(path.join(__dirname, "testdata", "attestation-vectors.json"), "utf8")
 );
 
+// Redirect the pending-grants default path into a throwaway temp dir for the whole test process,
+// so any test that exercises a persist path without its own withEnv override (the sync status
+// tests below, which trigger a delete-on-finish write-through) never litters ./pending-grants.json
+// into the repo. withEnv-based tests still set their own path and are unaffected by this default.
+process.env.SORT_PENDING_GRANTS_FILE =
+  process.env.SORT_PENDING_GRANTS_FILE ||
+  path.join(fs.mkdtempSync(path.join(os.tmpdir(), "sort-pending-grants-default-")), "pending-grants.json");
+
 /** A minimal req stand-in for readBody()/handler functions: a real EventEmitter (so req.on
  *  works exactly as it does on a real http.IncomingMessage) with `.headers` and `.socket`, that
  *  emits the given body as one 'data' chunk then 'end' on the next tick. */
@@ -219,6 +227,7 @@ test("handleJoinRequestSubmit: falls back to the manual queue when unauthenticat
       SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
       SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
       SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests-auto.json"),
+      SORT_PENDING_GRANTS_FILE: tmpFile("pending-grants-auto.json"),
     },
     async () => {
       delete require.cache[require.resolve("./server.js")];
@@ -416,6 +425,7 @@ test(
           SORT_CHANNEL_BROKER: "test-edge:4435",
           SORT_CHANNEL_RELAY: "test-edge:4436",
           SORT_PARTICIPANTS_APPROVED_FILE: tmpFile("participants-approved.json"),
+          SORT_PENDING_GRANTS_FILE: tmpFile("pending-grants.json"),
         },
         async () => {
           delete require.cache[require.resolve("./server.js")];
@@ -533,6 +543,60 @@ test(
     assert.equal(pendingGrantDelivery.has("p1"), false, "the retry's own successful delivery clears it");
   }
 );
+
+// --- Durable grant-delivery slot (CADS-DEMO-sort#26: a redeploy must not strand a grant) -------
+
+test(
+  "pending-grants persistence: an approved grant survives a bridge restart and is still deliverable " +
+    "(CADS-DEMO-sort#26: redeploy between approve and the participant's poll used to wipe it)",
+  async () => {
+    const file = tmpFile("pending-grants.json");
+    await withEnv({ SORT_PENDING_GRANTS_FILE: file }, () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { loadPendingGrants, persistPendingGrants, handleJoinRequestStatus } = require("./server.js");
+
+      // Approve wrote the slot and persisted it (the ".set() then persistPendingGrants()" pair).
+      const atApproveTime = new Map([["p1", { channel: "chan-hex", grantB: "grant-hex", createdAt: 111 }]]);
+      persistPendingGrants(atApproveTime);
+      assert.ok(fs.existsSync(file), "approve persisted the slot to the durable file");
+
+      // The bridge redeploys -- a brand-new empty in-memory Map is what boot starts with; the fix
+      // is that loadPendingGrants() rehydrates it from the file rather than losing the grant.
+      const afterRestart = loadPendingGrants();
+      assert.deepEqual(
+        afterRestart.get("p1"),
+        { channel: "chan-hex", grantB: "grant-hex", createdAt: 111 },
+        "the grant survives the restart intact"
+      );
+
+      // The participant's first successful poll after the restart still gets their grant...
+      const res = fakeRes();
+      handleJoinRequestStatus({}, res, new Map(), afterRestart, "p1");
+      assert.deepEqual(JSON.parse(res.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
+      assert.equal(afterRestart.has("p1"), false, "single-delivery still clears it in memory");
+
+      // ...and that clear is itself persisted, so a SECOND redeploy can't resurrect an already-
+      // delivered grant and hand it out again.
+      const afterSecondRestart = loadPendingGrants();
+      assert.equal(afterSecondRestart.has("p1"), false, "delete-on-finish was persisted too");
+    });
+  }
+);
+
+test("loadPendingGrants: a missing or malformed file degrades to an empty Map, never throws", async () => {
+  await withEnv({ SORT_PENDING_GRANTS_FILE: tmpFile("does-not-exist.json") }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { loadPendingGrants } = require("./server.js");
+    assert.equal(loadPendingGrants().size, 0, "no file -> empty, not a crash");
+  });
+  const bad = tmpFile("corrupt.json");
+  fs.writeFileSync(bad, "{ this is not json");
+  await withEnv({ SORT_PENDING_GRANTS_FILE: bad }, () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { loadPendingGrants } = require("./server.js");
+    assert.equal(loadPendingGrants().size, 0, "corrupt file -> empty, not a crash");
+  });
+});
 
 // --- Automation session (admin.html's real login form -> POST /api/admin/oidc-session) --------
 

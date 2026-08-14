@@ -38,6 +38,10 @@ services:
       - SORT_ADMIN_EMAILS=${SORT_ADMIN_EMAILS:-}
       - SORT_JOIN_REQUESTS_FILE=/var/lib/sort-demo/join-requests.json
       - SORT_PARTICIPANTS_APPROVED_FILE=/var/lib/sort-demo/participants-approved.json
+      # The one-shot grant-delivery slot, persisted on the same writable volume so a bridge
+      # redeploy between approval and the participant's status poll can't strand a grant
+      # (CADS-DEMO-sort#26). Must be on sort_demo_waiting_room, like the two files above.
+      - SORT_PENDING_GRANTS_FILE=/var/lib/sort-demo/pending-grants.json
       # This deployment's own Agent-Fabric channel identity, public halves only (see
       # docs/onboarding.md / GET /api/channel-info) -- mint once with `ct-agent channel init`.
       - SORT_CHANNEL_OPERATOR_PUBKEY=${SORT_CHANNEL_OPERATOR_PUBKEY:-}
@@ -84,7 +88,8 @@ services:
       - ./handlers:/opt/sort-demo/handlers:ro
       # Deliberately writable (unlike every mount above) and deliberately its OWN named volume,
       # not a path under the operator's own SORT_PARTICIPANTS_CONFIG tree -- the bridge writes
-      # here (join-requests.json, participants-approved.json) via the waiting-room admin flow;
+      # here (join-requests.json, participants-approved.json, pending-grants.json) via the
+      # waiting-room admin flow;
       # the operator's own curated base file above stays read-only and untouched either way.
       - sort_demo_waiting_room:/var/lib/sort-demo
     # No `ports:` mapping — matches CADS-flappy-demo/CADS-cookbook-demo/CADS-a2a-demo's

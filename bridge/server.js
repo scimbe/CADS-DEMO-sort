@@ -326,6 +326,40 @@ function persistJoinRequests(joinRequests) {
   }
 }
 
+/** The one-shot grant-delivery slot (pendingGrantDelivery) persisted to SORT_PENDING_GRANTS_FILE,
+ *  same write-through pattern as join-requests above. This is the CADS-DEMO-sort#26 fix: without
+ *  it, a bridge redeploy between approval and the participant's own status poll wiped the only copy
+ *  of grantB -- the participant was registered with the control plane (durable) but had no way to
+ *  retrieve the grant they need to actually dial in, and the operator had to notice and re-run
+ *  approve. Persisting the slot means a redeploy can no longer strand a grant. The Map's VALUE
+ *  carries no `you` (it's the key), so persistence flattens `you` back in and load reconstructs it.
+ *  Note this file, like SORT_JOIN_REQUESTS_FILE, must live on the bridge's writable volume -- a
+ *  path the bridge can't write to silently degrades to the old in-memory-only behavior (logged). */
+function loadPendingGrants() {
+  const path = process.env.SORT_PENDING_GRANTS_FILE || "./pending-grants.json";
+  const map = new Map();
+  if (fs.existsSync(path)) {
+    try {
+      for (const entry of JSON.parse(fs.readFileSync(path, "utf8"))) {
+        if (entry && typeof entry.you === "string") {
+          map.set(entry.you, { channel: entry.channel, grantB: entry.grantB, createdAt: entry.createdAt });
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`pending-grants: could not load ${path}: ${e.message} -- starting empty\n`);
+    }
+  }
+  return map;
+}
+function persistPendingGrants(pendingGrantDelivery) {
+  const path = process.env.SORT_PENDING_GRANTS_FILE || "./pending-grants.json";
+  try {
+    writeJsonFileAtomic(path, [...pendingGrantDelivery.entries()].map(([you, v]) => ({ you, ...v })));
+  } catch (e) {
+    process.stderr.write(`pending-grants: could not persist to ${path}: ${e.message}\n`);
+  }
+}
+
 /** Spawn `cmd` under `sh -c`, write `JSON.stringify(input)` to stdin, resolve with stdout.
  *  Rejects (never throws synchronously, never leaves a dangling process) on timeout / non-zero
  *  exit / spawn failure — exactly the contract runRound's callHandler expects.
@@ -1353,6 +1387,7 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
     }
     addApprovedParticipant(participants, { you, label: pending.label, cmd: result.cmd });
     pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
+    persistPendingGrants(pendingGrantDelivery);
     process.stderr.write(`join-requests: auto-approved "${you}" (${gateEmail})\n`);
     res.writeHead(200, { "content-type": "application/json" });
     res.end(JSON.stringify({ ok: true, channelId: channel.toString("hex"), approved: true }));
@@ -1421,6 +1456,7 @@ async function handleJoinRequestApprove(req, res, joinRequests, participants, pe
   persistJoinRequests(joinRequests);
   addApprovedParticipant(participants, { you: pending.you, label: pending.label, cmd: result.cmd });
   pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
+  persistPendingGrants(pendingGrantDelivery);
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({ ok: true, you: pending.you, label: pending.label, channel: result.channel }));
 }
@@ -1444,7 +1480,10 @@ function handleJoinRequestStatus(req, res, joinRequests, pendingGrantDelivery, y
     // was meant to stop a stale grant lingering forever, not to punish a dropped connection.
     // A retry that lands after a genuine successful delivery finds the entry gone and reports
     // "unknown", same as today; a retry after a failed delivery now finds it still there.
-    res.on("finish", () => pendingGrantDelivery.delete(you));
+    res.on("finish", () => {
+      pendingGrantDelivery.delete(you);
+      persistPendingGrants(pendingGrantDelivery);
+    });
     res.end(JSON.stringify({ status: "approved", channel: entry.channel, grant: entry.grantB }));
     return;
   }
@@ -1518,12 +1557,12 @@ function main() {
   const joinRequests = loadJoinRequests();
   // "you" -> {channel, grantB, createdAt} -- Phase 2's one-shot delivery slot for a participant's
   // own grant, read once by their own join.js status poll (handleJoinRequestStatus) then deleted.
-  // In-memory only: if the bridge restarts before a participant polls, they're already fully
-  // registered with the control plane (that part is durable), just need the operator to re-run
-  // approve (idempotent-ish: mintGrants signs a fresh grant, registration calls are themselves
-  // idempotent server-side) -- an acceptable, disclosed gap rather than adding a third
-  // persisted-file format for what's meant to be a brief, one-time handoff.
-  const pendingGrantDelivery = new Map();
+  // Persisted to SORT_PENDING_GRANTS_FILE and reloaded here at boot (CADS-DEMO-sort#26): a bridge
+  // restart between approval and the participant's poll used to wipe this in-memory-only Map,
+  // stranding the grant (participant registered with the control plane but with no way to fetch
+  // grantB, needing the operator to notice and re-run approve). It now survives a redeploy; the
+  // delete-on-successful-delivery semantics are unchanged, and every mutation writes through.
+  const pendingGrantDelivery = loadPendingGrants();
   const server = http.createServer((req, res) => {
     // Permissive CORS: this API carries no session/cookie/secret and never accepts a
     // client-supplied handler command (see the header comment), so there's nothing an
@@ -1657,6 +1696,8 @@ module.exports = {
   handleRevokeApprovedParticipant,
   loadJoinRequests,
   persistJoinRequests,
+  loadPendingGrants,
+  persistPendingGrants,
   gateVerifiedEmail,
   ADMIN_EMAILS,
   readSecret,
