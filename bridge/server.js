@@ -532,8 +532,27 @@ const persistentClients = new Map(); // stored cmd -> PersistentRoleClient (one 
 
 /** The single role-call entry point the arena modes use: persistent session per participant by
  *  default (#19), one-shot per round as the opt-out. Both paths re-apply freshenedCmd at spawn
- *  time, so certs stay live either way. */
+ *  time, so certs stay live either way.
+ *
+ *  ONLY a `ct-agent channel` command speaks the CT_CHANNEL_CALL_PERSISTENT envelope contract
+ *  (one {"ok":...} line per call, long-lived process). A bridge-LOCAL handler (a plain shell
+ *  script from SORT_PARTICIPANTS_FILE, e.g. reference-sorter.sh) is one-shot: it reads one
+ *  round, prints one RAW move JSON ({"action":...}, no envelope), and exits. Wrapping such a
+ *  handler in PersistentRoleClient misreads its first reply as a failed envelope (`ok` absent),
+ *  kills+respawns, fails again, and every round surfaces as "persistent role command failed"
+ *  -- reproduced live 2026-08-14 ~04:45 UTC: ALL bridge-local runs (reference-sorter included)
+ *  stopped producing rounds while channel participants kept working. Channel-command detection
+ *  by the literal `ct-agent channel` suffix automateApproval/freshenedCmd already construct.
+ *  Local handlers also skip freshenedCmd entirely: it exists to keep CT_CHANNEL_* transport env
+ *  live, which a local handler neither reads nor needs -- and skipping it avoids a per-round
+ *  /pki/ca round-trip for handlers with no channel at all. */
+function isChannelCmd(storedCmd) {
+  return /\bct-agent channel\b/.test(storedCmd);
+}
 function roleCall(storedCmd, input) {
+  if (!isChannelCmd(storedCmd)) {
+    return callHandlerProcess(storedCmd, input);
+  }
   if (!persistentCallsEnabled()) {
     return freshenedCmd(storedCmd).then((cmd) => callHandlerProcess(cmd, input));
   }
