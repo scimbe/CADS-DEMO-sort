@@ -51,7 +51,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 #     request spacing -> 4/4 OK, 20s spacing -> 1/4). The `'K'` ping interval is 8s, deliberately
 #     just under that threshold.
 FROM rust:1-slim-bookworm AS ct-agent-builder
-ARG CT_AGENT_REF=v0.4.13
+ARG CT_AGENT_REF=v0.4.15
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev cmake protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
