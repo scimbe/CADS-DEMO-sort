@@ -11,6 +11,7 @@
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
 LLM="${CT_LLM_CMD:-claude}"
 OUT_DIR="$HERE/generated"
 OUT_FILE="$OUT_DIR/handler.py"
@@ -28,7 +29,16 @@ PROTOCOL_MD="$(cat "$HERE/../CLAUDE.md")"
 # interpolation in the template; the two placeholders are substituted afterward via plain string
 # replacement (${var//search/replacement}), which never re-interprets the replacement text as
 # shell, however many backticks or `$` characters it contains.
-TEMPLATE="$(cat <<'TEMPLATE_EOF'
+TEMPLATE_TMP="$(mktemp)"
+trap 'rm -f "$TEMPLATE_TMP"' EXIT
+# The heredoc is written to a temp file rather than captured directly via TEMPLATE="$(cat <<'EOF' ...)"
+# because macOS's stock /bin/bash (3.2.57, frozen since 2007 for GPLv3-licensing reasons) mis-parses
+# a quoted heredoc nested inside a $() command substitution whenever the heredoc body contains an
+# odd number of single-quote characters -- and this template's own prose ("protocol's bounds") is
+# one such apostrophe, so this broke for every participant using this exact template, independent
+# of AGENTS.md content. Splitting the heredoc-write and the $() read into two separate statements
+# sidesteps the bug entirely (bash >= 4 does not have it, but the temp-file form works everywhere).
+cat <<'TEMPLATE_EOF' > "$TEMPLATE_TMP"
 GOAL
 Write a single, complete, self-contained Python 3 program that implements the sorting strategy
 described below as real, deterministic code — not as instructions for a model to follow live.
@@ -59,7 +69,7 @@ CONSTRAINTS
 OUTPUT
 Emit the complete contents of generated/handler.py as raw Python source, and nothing else.
 TEMPLATE_EOF
-)"
+TEMPLATE="$(cat "$TEMPLATE_TMP")"
 PROMPT="${TEMPLATE//__PROTOCOL_MD__/$PROTOCOL_MD}"
 PROMPT="${PROMPT//__AGENTS_MD__/$AGENTS_MD}"
 
