@@ -24,7 +24,7 @@ your participant id. Only two things ever come from the repo: the move contract
 
 ```bash
 # 1. copy the trio into a NEW participant directory (never edit the template in place)
-REPO="$(pwd)"                                  # path of this clone
+REPO="$(git rev-parse --show-toplevel)"        # this clone, from anywhere inside it
 mkdir -p ../<your-id>/generated && cd ../<your-id>
 cp "$REPO"/templates/generated-python/{generate.sh,handler.sh,reference-handler.py} .
 export SORT_PROTOCOL_MD="$REPO/participants/CLAUDE.md"   # generate.sh reads the contract from here
