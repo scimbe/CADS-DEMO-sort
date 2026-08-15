@@ -44,12 +44,19 @@ language is completely fine:
 
 1. Turn what you told me into a real strategy spec — `participants/<your-id>/AGENTS.md` — plain
    language, but precise about what to do and how to tell when you're done. For a brand-new
-   participant, I copy `templates/generated-python/generate.sh` and `handler.sh` into your new
-   `participants/<your-id>/` directory first — that generic pair derives your participant id from
-   the directory name itself (via `basename`) rather than having anything hardcoded, so the copy
-   needs no edits before it can run; only `AGENTS.md` has to exist first.
-2. Run `generate.sh`, which asks the model to write that strategy as a real, self-contained Python
-   program (`generated/handler.py`) — code, not a promise to follow instructions live.
+   participant, I copy `templates/generated-python/generate.sh`, `handler.sh` AND
+   `reference-handler.py` into your new `participants/<your-id>/` directory first — that generic
+   trio derives your participant id from the directory name itself (via `basename`) rather than
+   having anything hardcoded, so the copy needs no edits before it can run; only `AGENTS.md` has
+   to exist first. I then copy `reference-handler.py` to `generated/handler.py`, and **that is
+   your first success, immediately**: a working, contract-verified baseline sorter you can
+   selftest, dry-run and race in the local arena before any model call has happened — first
+   success does not wait on a generation (CADS-DEMO-sort#30).
+2. Run `generate.sh`, which asks the model to REPLACE that baseline with your own strategy as a
+   real, self-contained Python program (`generated/handler.py`) — code, not a promise to follow
+   instructions live. `generate.sh` compile-checks what comes back (`py_compile`) and
+   automatically regenerates once on garbage output, so a bad model draw costs seconds, not a
+   confusing broken artifact.
 3. Verify what came back, three ways: `handler.sh --selftest` (does it speak the contract at
    all), a local dry run (`dryrun.py`) that actually sorts a real array with it — run **twice** on
    the same array, to confirm it's genuinely deterministic code and not a live guess that happened

@@ -18,18 +18,24 @@ which also shows the class of live-judgment bug this shape eliminates.
 ## How to use it
 
 ```bash
-# 1. copy the pair into a NEW participant directory (never edit the template in place)
-mkdir -p participants/<your-id>
-cp templates/generated-python/generate.sh templates/generated-python/handler.sh participants/<your-id>/
+# 1. copy the trio into a NEW participant directory (never edit the template in place)
+mkdir -p participants/<your-id>/generated
+cp templates/generated-python/{generate.sh,handler.sh,reference-handler.py} participants/<your-id>/
 
-# 2. write the one file that is genuinely yours: the strategy spec
-$EDITOR participants/<your-id>/AGENTS.md     # plain language; see the tutorials for working examples
-
-# 3. generate + verify (both documented end to end in docs/onboarding.md)
+# 2. INSTANT first success — a working baseline before any model call (CADS-DEMO-sort#30):
 cd participants/<your-id>
-./generate.sh                                 # asks $CT_LLM_CMD (default: claude) to write generated/handler.py
-./handler.sh --selftest                       # does the generated code speak the contract at all?
-python3 ../../dryrun.py ./handler.sh --len 8 --seed 42   # actually sorts a real array — run twice, must match
+cp reference-handler.py generated/handler.py
+./handler.sh --selftest                       # passes right now
+python3 ../../dryrun.py ./handler.sh --len 8 --seed 42   # sorts right now (18 rounds, faults=0)
+
+# 3. write the one file that is genuinely yours: the strategy spec
+$EDITOR AGENTS.md                             # plain language; see the tutorials for working examples
+
+# 4. generate your own strategy + verify (documented end to end in docs/onboarding.md)
+./generate.sh                                 # $CT_LLM_CMD (default: claude) REPLACES the baseline with your strategy;
+                                              # output is py_compile-checked, one automatic retry on garbage
+./handler.sh --selftest
+python3 ../../dryrun.py ./handler.sh --len 8 --seed 42   # run twice, must match
 ```
 
 What goes **next to** the copied pair:
@@ -37,6 +43,7 @@ What goes **next to** the copied pair:
 | File | Who writes it | Purpose |
 |---|---|---|
 | `AGENTS.md` | **you** | the strategy spec `generate.sh` feeds to the model — the only required input |
+| `reference-handler.py` | ships with the template | working baseline (adjacent-inversion bubble step, contract-verified incl. `correction`) — copy to `generated/handler.py` for an instant first success |
 | `generated/handler.py` | the model, via `generate.sh` | your actual competitor; regenerate any time `AGENTS.md` changes |
 
 `generated/` is gitignored repo-wide (generated code is rebuilt, not committed).

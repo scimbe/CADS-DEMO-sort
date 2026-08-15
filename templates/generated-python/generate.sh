@@ -72,19 +72,53 @@ PROMPT="${TEMPLATE//__PROTOCOL_MD__/$PROTOCOL_MD}"
 PROMPT="${PROMPT//__AGENTS_MD__/$AGENTS_MD}"
 PROMPT="${PROMPT//__YOU__/$YOU}"
 
-RAW="$("$LLM" -p "$PROMPT" --output-format text \
-  --disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent" 2>/dev/null)" || {
-  echo "generate.sh: claude -p failed" >&2
-  exit 1
-}
+# Same execution-probe as handler.sh: `command -v python3` finds Windows' Store alias stub, so
+# probe by actually running it (CADS-DEMO-sort-docs#1, second round).
+PY=""
+for c in python3 python py; do
+  if "$c" -c 'import sys' >/dev/null 2>&1; then PY="$c"; break; fi
+done
+[ -n "$PY" ] || { echo "generate.sh: no working python3/python/py found on PATH" >&2; exit 1; }
 
-# Strip a markdown fence if the model added one anyway, despite the CONSTRAINTS above --
-# defensive, not load-bearing: real-world LLM output sometimes wraps code in ```python...```
-# even when told not to.
-CODE="$(printf '%s\n' "$RAW" | sed -e '/^```/d')"
+# Validate-and-retry (CADS-DEMO-sort#30): measured over 8 real generations, 2/5 outputs were
+# unusable for the SAME reason -- the model appended English prose after valid Python, which the
+# fence-stripping sed below cannot catch, and the user only found out at --selftest, after
+# burning up to 125s on the failed attempt. `py_compile` catches that class in milliseconds, so
+# a failed draw costs one automatic regeneration instead of a user-visible broken artifact.
+# Bounded at 2 attempts: a second identical failure means something is genuinely wrong with the
+# prompt/model and a human should look, not a loop.
+MAX_ATTEMPTS=2
+for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+  RAW="$("$LLM" -p "$PROMPT" --output-format text \
+    --disallowedTools "Edit,Write,Bash,WebFetch,WebSearch,Agent" 2>/dev/null)" || {
+    echo "generate.sh: LLM call failed (attempt $attempt/$MAX_ATTEMPTS)" >&2
+    [ "$attempt" -lt "$MAX_ATTEMPTS" ] && continue
+    exit 1
+  }
 
-printf '%s\n' "$CODE" > "$OUT_FILE"
-chmod +x "$OUT_FILE"
+  # Strip a markdown fence if the model added one anyway, despite the CONSTRAINTS above --
+  # defensive, not load-bearing: real-world LLM output sometimes wraps code in ```python...```
+  # even when told not to.
+  CODE="$(printf '%s\n' "$RAW" | sed -e '/^```/d')"
 
-echo "generate.sh: wrote $OUT_FILE ($(wc -l < "$OUT_FILE") lines)"
-echo "generate.sh: verify with: $HERE/handler.sh --selftest"
+  printf '%s\n' "$CODE" > "$OUT_FILE"
+  chmod +x "$OUT_FILE"
+
+  if "$PY" -m py_compile "$OUT_FILE" 2>"$OUT_DIR/.compile-err"; then
+    rm -f "$OUT_DIR/.compile-err"
+    echo "generate.sh: wrote $OUT_FILE ($(wc -l < "$OUT_FILE") lines, compiles clean, attempt $attempt/$MAX_ATTEMPTS)"
+    echo "generate.sh: verify with: $HERE/handler.sh --selftest"
+    exit 0
+  fi
+  echo "generate.sh: attempt $attempt/$MAX_ATTEMPTS produced code that does not compile:" >&2
+  sed 's/^/generate.sh:   /' "$OUT_DIR/.compile-err" >&2
+  [ "$attempt" -lt "$MAX_ATTEMPTS" ] && echo "generate.sh: regenerating..." >&2
+done
+
+# Both attempts failed: keep the last broken artifact for inspection under a name handler.sh
+# will never execute, so a later run cannot mistake it for a working handler.
+mv "$OUT_FILE" "$OUT_FILE.rejected"
+echo "generate.sh: FAILED after $MAX_ATTEMPTS attempts -- last output kept at $OUT_FILE.rejected" >&2
+echo "generate.sh: tip: the shipped reference-handler.py is a working baseline while you retry:" >&2
+echo "generate.sh:   cp \"$HERE/reference-handler.py\" \"$OUT_FILE\"" >&2
+exit 1
