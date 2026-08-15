@@ -47,13 +47,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
-    # windows-latest is reported but NOT yet gating: the job's first run surfaced a real
-    # participant-path fault on Windows (every dryrun round faulted), root-caused to the missing
-    # .gitattributes now added in this commit. Until a green Windows run confirms that fix, its
-    # result stays visible-but-non-blocking rather than either red-gating main on a
-    # not-yet-verified fix or silently hiding the platform. Flip this to gating (delete the line)
-    # once Windows passes -- "runs on Windows" becomes a checked claim at that point, not before.
-    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     defaults:
       run:
         shell: bash
