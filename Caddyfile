@@ -66,6 +66,20 @@
 		reverse_proxy sort-demo-bridge:8789
 	}
 
+	# A participant removes ITSELF (CADS-DEMO-sort#30) -- public by design, exactly like @join-status:
+	# the request body carries a holder-key signature over this deployment's channel, and only
+	# whoever holds the private key that created the entry can produce it (see handleParticipantLeave;
+	# the bridge re-verifies regardless). Symmetric with the self-service join. Method+shape matched
+	# (POST, ends in /leave) so it can never widen to the ADMIN /api/participants/approved/*/revoke
+	# route gated below -- different id segment, different suffix.
+	@participant-leave {
+		method POST
+		path /api/participants/*/leave
+	}
+	handle @participant-leave {
+		reverse_proxy sort-demo-bridge:8789
+	}
+
 	# Admin-only API routes (list/approve/decline pending join requests, finish admitting a
 	# participant) -- gated, then proxied to the bridge, which re-checks X-Gate-Email against
 	# SORT_ADMIN_EMAILS itself regardless (never trust the gate alone -- see requireAdmin).

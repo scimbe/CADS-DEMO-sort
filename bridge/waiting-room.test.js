@@ -714,6 +714,83 @@ test("addApprovedParticipant: stamps lastSeenAt at approval time (approval count
   });
 });
 
+// --- Self-service leave (CADS-DEMO-sort#30: join is self-service, leaving must be too) ---------
+
+test("handleParticipantLeave: a holder-key-signed request removes the participant; wrong key / unknown id / bad sig are refused", async () => {
+  const genIdentity = () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+    return {
+      pub: publicKey.export({ type: "spki", format: "der" }).subarray(-32),
+      priv: privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32),
+    };
+  };
+  const operator = genIdentity();
+  const bridgeHolder = genIdentity();
+  const participant = { holder: genIdentity(), noise: genIdentity() };
+  const attacker = { holder: genIdentity(), noise: genIdentity() };
+
+  const { channelIdForLink, memberNoiseAttestBytes } = require("./attestation.js");
+  const sign = (holderPriv, msg) =>
+    crypto.sign(null, msg, crypto.createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), holderPriv]),
+      format: "der",
+      type: "pkcs8",
+    }));
+  const channel = channelIdForLink(operator.pub, bridgeHolder.pub, participant.holder.pub);
+  const goodAttestation = sign(participant.holder.priv, memberNoiseAttestBytes(channel, participant.holder.pub, participant.noise.pub));
+
+  const approvedFile = tmpFile("participants-approved.json");
+  fs.writeFileSync(approvedFile, JSON.stringify([
+    { you: "leaver", label: "Leaver", cmd: "x", holderPub: participant.holder.pub.toString("hex") },
+    { you: "admin-added", label: "Admin", cmd: "y" }, // no holderPub -> not self-leavable
+  ]));
+
+  await withEnv({
+    SORT_PARTICIPANTS_APPROVED_FILE: approvedFile,
+    SORT_PARTICIPANTS_FILE: "",
+    SORT_CHANNEL_OPERATOR_PUBKEY: operator.pub.toString("hex"),
+    SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: bridgeHolder.pub.toString("hex"),
+  }, async () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { handleParticipantLeave } = require("./server.js");
+    const body = (h, n, a) => fakeReq({ holderPub: h.toString("hex"), noisePub: n.toString("hex"), attestation: a.toString("hex") });
+
+    // Unknown id -> 404.
+    let res = fakeRes();
+    await handleParticipantLeave(body(participant.holder.pub, participant.noise.pub, goodAttestation), res, new Map(), "nobody");
+    assert.equal(res.statusCode, 404);
+
+    // Admin-added entry (no stored holderPub) -> 404, never self-leavable.
+    res = fakeRes();
+    await handleParticipantLeave(body(participant.holder.pub, participant.noise.pub, goodAttestation), res, new Map(), "admin-added");
+    assert.equal(res.statusCode, 404);
+
+    // Attacker signs for THEIR own valid identity but submits it against someone else's id -> 403
+    // (their holderPub doesn't match the stored one). This is the griefing case the check exists for.
+    const attackerChannel = channelIdForLink(operator.pub, bridgeHolder.pub, attacker.holder.pub);
+    const attackerAttestation = sign(attacker.holder.priv, memberNoiseAttestBytes(attackerChannel, attacker.holder.pub, attacker.noise.pub));
+    res = fakeRes();
+    await handleParticipantLeave(body(attacker.holder.pub, attacker.noise.pub, attackerAttestation), res, new Map(), "leaver");
+    assert.equal(res.statusCode, 403, "another identity's valid signature must not remove a different participant");
+
+    // Right holderPub but a signature that doesn't verify -> 400.
+    res = fakeRes();
+    const garbageSig = Buffer.alloc(64, 7);
+    await handleParticipantLeave(body(participant.holder.pub, participant.noise.pub, garbageSig), res, new Map(), "leaver");
+    assert.equal(res.statusCode, 400);
+
+    // The real thing: correct identity, correct signature -> removed, id freed.
+    const participants = new Map([["leaver", { you: "leaver", label: "Leaver", cmd: "x" }]]);
+    res = fakeRes();
+    await handleParticipantLeave(body(participant.holder.pub, participant.noise.pub, goodAttestation), res, participants, "leaver");
+    assert.equal(res.statusCode, 200);
+    assert.equal(participants.has("leaver"), false, "removed from the live roster Map");
+    const onDisk = JSON.parse(fs.readFileSync(approvedFile, "utf8"));
+    assert.equal(onDisk.some((p) => p.you === "leaver"), false, "removed from the approved file too");
+    assert.equal(onDisk.some((p) => p.you === "admin-added"), true, "the admin-added entry is untouched");
+  });
+});
+
 // --- Automation session (admin.html's real login form -> POST /api/admin/oidc-session) --------
 
 test("currentOidcToken: falls back to the static SORT_OIDC_TOKEN when no live session exists", async () => {

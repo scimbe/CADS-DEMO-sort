@@ -1497,7 +1497,7 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
     if (!result.ok) {
       return jsonError(res, 502, `automated approval failed: ${result.detail}`);
     }
-    addApprovedParticipant(participants, { you, label: pending.label, cmd: result.cmd });
+    addApprovedParticipant(participants, { you, label: pending.label, cmd: result.cmd, holderPub: pending.holderPub });
     pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
     persistPendingGrants(pendingGrantDelivery);
     process.stderr.write(`join-requests: auto-approved "${you}" (${gateEmail})\n`);
@@ -1566,7 +1566,7 @@ async function handleJoinRequestApprove(req, res, joinRequests, participants, pe
   }
   joinRequests.delete(you);
   persistJoinRequests(joinRequests);
-  addApprovedParticipant(participants, { you: pending.you, label: pending.label, cmd: result.cmd });
+  addApprovedParticipant(participants, { you: pending.you, label: pending.label, cmd: result.cmd, holderPub: pending.holderPub });
   pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
   persistPendingGrants(pendingGrantDelivery);
   res.writeHead(200, { "content-type": "application/json" });
@@ -1664,6 +1664,62 @@ function handleRevokeApprovedParticipant(req, res, participants, you) {
   res.end(JSON.stringify({ ok: true, you }));
 }
 
+/** POST /api/participants/:you/leave -- public, but self-AUTHENTICATING (CADS-DEMO-sort#30: join
+ *  is self-service, leaving was not -- the only exit was the 24h liveness sweep, so every trial
+ *  left a day-long corpse in the shared roster). Symmetric counterpart to the join: the caller
+ *  proves possession of the participant's holder private key by signing the SAME member-noise
+ *  attestation the join verified, over this deployment's channel for that holder. No admin gate,
+ *  no operator involvement -- and no griefing surface: only whoever holds the private key that
+ *  created the entry can remove it, and only entries that were self-service-joined (hence carry a
+ *  stored holderPub) are removable this way; an operator-hand-added participant has no stored
+ *  holderPub and stays admin-only, which is correct. */
+async function handleParticipantLeave(req, res, participants, you) {
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (e) {
+    return jsonError(res, 400, `invalid body: ${e.message}`);
+  }
+  const { holderPub, noisePub, attestation } = body || {};
+  if (typeof holderPub !== "string" || !HEX32_RE.test(holderPub)) return jsonError(res, 400, "holderPub must be 64 hex chars");
+  if (typeof noisePub !== "string" || !HEX32_RE.test(noisePub)) return jsonError(res, 400, "noisePub must be 64 hex chars");
+  if (typeof attestation !== "string" || !HEX64_RE.test(attestation)) return jsonError(res, 400, "attestation must be 128 hex chars");
+
+  // Only a self-service-admitted entry (in the approved file) is leavable this way, and only if it
+  // carries a stored holderPub. Generic 404 whether it's absent, admin-added-without-holderPub, or
+  // just gone -- never disclose which, and never reach into the operator's base file.
+  const entry = listApprovedParticipants().find((p) => p && p.you === you);
+  if (!entry || typeof entry.holderPub !== "string") {
+    return jsonError(res, 404, `"${you}" is not a self-service-admitted participant that can self-remove`);
+  }
+  // The submitted key must be THIS participant's, not merely a valid key -- otherwise anyone who
+  // can sign for their own identity could remove someone else's id.
+  if (entry.holderPub !== holderPub) {
+    return jsonError(res, 403, "holderPub does not match this participant -- only its own holder key may remove it");
+  }
+
+  const operatorPubHex = process.env.SORT_CHANNEL_OPERATOR_PUBKEY;
+  const bridgeHolderHex = process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY;
+  if (!operatorPubHex || !bridgeHolderHex) return jsonError(res, 503, "channel identity not configured on this deployment");
+  const channel = channelIdForLink(
+    Buffer.from(operatorPubHex, "hex"),
+    Buffer.from(bridgeHolderHex, "hex"),
+    Buffer.from(holderPub, "hex")
+  );
+  const valid = verifyMemberNoiseAttestation(
+    channel,
+    Buffer.from(holderPub, "hex"),
+    Buffer.from(noisePub, "hex"),
+    Buffer.from(attestation, "hex")
+  );
+  if (!valid) return jsonError(res, 400, "attestation does not verify against holderPub for this deployment's channel");
+
+  removeApprovedParticipant(participants, you);
+  process.stderr.write(`participants: "${you}" self-removed (holder-key-authenticated leave)\n`);
+  res.writeHead(200, { "content-type": "application/json" });
+  res.end(JSON.stringify({ ok: true, you, left: true }));
+}
+
 function main() {
   const participants = loadParticipants();
   const joinRequests = loadJoinRequests();
@@ -1759,6 +1815,14 @@ function main() {
       handleRevokeApprovedParticipant(req, res, participants, decodeURIComponent(revokeMatch[1]));
       return;
     }
+    // NB: ordered AFTER the /approved/:you/revoke match so ":you" can't swallow "approved" -- a
+    // participant literally named "approved" is impossible anyway (approved is not a valid id), but
+    // matching the more specific admin route first keeps that guarantee structural, not incidental.
+    const leaveMatch = url.pathname.match(/^\/api\/participants\/([^/]+)\/leave$/);
+    if (req.method === "POST" && leaveMatch) {
+      handleParticipantLeave(req, res, participants, decodeURIComponent(leaveMatch[1]));
+      return;
+    }
     const runMatch = url.pathname.match(/^\/run\/([^/]+)$/);
     if (req.method === "POST" && runMatch) {
       handleRun(req, res, participants, decodeURIComponent(runMatch[1]), url.searchParams);
@@ -1841,6 +1905,7 @@ module.exports = {
   handleAddApprovedParticipant,
   handleListApprovedParticipants,
   handleRevokeApprovedParticipant,
+  handleParticipantLeave,
   loadJoinRequests,
   persistJoinRequests,
   loadPendingGrants,
