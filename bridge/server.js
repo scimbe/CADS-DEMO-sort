@@ -1292,6 +1292,33 @@ async function automateApproval(pending) {
     };
   }
 
+  // Portal grant deposit (CADS-Tunnel#514, live since 2026-08-15; unblocks CADS-DEMO-sort#20):
+  // deposit the participant's own grant (grantB) with the control plane, so it is durably
+  // claimable at /portal/channels/<channel>/claim with a filled .env block -- independent of
+  // this bridge's own delivery slot. The one-shot status-poll path (pendingGrantDelivery)
+  // remains the fast path; this is the platform-level end of the sort#26/#28 stranded-grant
+  // class: no bridge-side mishap (redeploy, roster cleanup, crash) can take the participant's
+  // only copy with it anymore. Deliberately BEST-EFFORT: a deposit failure must not fail an
+  // approval whose channel + members are already registered (the participant is live either
+  // way) -- it is logged loudly and surfaced in the result instead, never silently swallowed.
+  // The CP validates the grant against its embedded channel/holder ids (a mismatch is a 400,
+  // not a silent stranding -- core's own contract for the endpoint).
+  let portalDeposit = false;
+  try {
+    const dep = await cpFetch(`/me/channels/${minted.channel}/grants/${pending.holderPub}`, { grant: minted.grantB });
+    portalDeposit = dep.status === 200;
+    if (!portalDeposit) {
+      process.stderr.write(
+        `join-requests: portal grant deposit for "${pending.you}" -> ${dep.status} ${String(dep.text).slice(0, 200)} ` +
+          `(approval unaffected; one-shot delivery still available)\n`
+      );
+    }
+  } catch (e) {
+    process.stderr.write(
+      `join-requests: portal grant deposit for "${pending.you}" failed: ${e.message} (approval unaffected)\n`
+    );
+  }
+
   // #106 :443 fallback, same optional treatment as everywhere else this pair appears --
   // present only when this deployment has actually set the front door.
   //
@@ -1343,7 +1370,7 @@ async function automateApproval(pending) {
     frontDoorEnv +
     `ct-agent channel`;
 
-  return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB };
+  return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB, portalDeposit };
 }
 
 // ---- Waiting room: route handlers --------------------------------------------------------------

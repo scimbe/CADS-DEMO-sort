@@ -485,14 +485,20 @@ test(
           assert.equal(delivery.channel, channel.toString("hex"));
           assert.ok(typeof delivery.grantB === "string" && delivery.grantB.length > 0);
 
-          // The control plane actually got called for real: one channel registration, then one
-          // member call per side (not fabricated or skipped).
-          assert.equal(received.length, 3);
+          // The control plane actually got called for real: one channel registration, one
+          // member call per side, and the portal grant deposit (CADS-Tunnel#514 / sort#20) --
+          // not fabricated or skipped.
+          assert.equal(received.length, 4);
           assert.equal(received[0].url, "/me/channels");
           assert.equal(received[0].body.channel, channel.toString("hex"));
-          const memberCalls = received.slice(1);
+          const memberCalls = received.slice(1, 3);
           const holders = memberCalls.map((c) => c.body.holder).sort();
           assert.deepEqual(holders, [bridge.holder.pub.toString("hex"), participant.holder.pub.toString("hex")].sort());
+          // The deposit call: participant's holder in the path, the SAME grantB the one-shot
+          // slot holds in the body -- the durable copy and the fast-path copy must be identical.
+          const deposit = received[3];
+          assert.equal(deposit.url, `/me/channels/${channel.toString("hex")}/grants/${participant.holder.pub.toString("hex")}`);
+          assert.equal(deposit.body.grant, delivery.grantB);
         }
       );
     } finally {
