@@ -72,6 +72,21 @@ function memberNoiseAttestBytes(channelHex, holderHex, noisePubHex) {
 
 function renderIdentity(identity) {
   identityBox.innerHTML = "";
+
+  // CADS-DEMO-sort#30 item 6a: say what this key material IS, in plain language, right next to
+  // it -- not in a linked how-to. A newcomer otherwise sees two keypairs and private keys with
+  // no way to know why an identity is needed at all.
+  const why = document.createElement("p");
+  why.className = "version-req";
+  why.textContent =
+    "Why keys? Your sorter runs on YOUR machine; the arena only ever dials it over an " +
+    "end-to-end-encrypted channel. Two keypairs make that work: the holder key is your identity " +
+    "(it signs this join request, and later proves to the network that the machine answering is " +
+    "really yours), and the noise key encrypts your rounds in transit. The private halves are " +
+    "generated in this browser and never leave it -- whoever holds them IS you, which is exactly " +
+    "why this page only ever submits the public halves plus a signature.";
+  identityBox.appendChild(why);
+
   const pub = document.createElement("div");
   pub.className = "identity-pub";
   pub.innerHTML = `<strong>Your holder public key</strong><code>${identity.holderPub}</code>`;

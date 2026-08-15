@@ -42,16 +42,21 @@ language is completely fine:
 
 ## What I do with it (you don't need to do this part by hand)
 
-1. Turn what you told me into a real strategy spec — `participants/<your-id>/AGENTS.md` — plain
-   language, but precise about what to do and how to tell when you're done. For a brand-new
-   participant, I copy `templates/generated-python/generate.sh`, `handler.sh` AND
-   `reference-handler.py` into your new `participants/<your-id>/` directory first — that generic
-   trio derives your participant id from the directory name itself (via `basename`) rather than
-   having anything hardcoded, so the copy needs no edits before it can run; only `AGENTS.md` has
-   to exist first. I then copy `reference-handler.py` to `generated/handler.py`, and **that is
-   your first success, immediately**: a working, contract-verified baseline sorter you can
-   selftest, dry-run and race in the local arena before any model call has happened — first
-   success does not wait on a generation (CADS-DEMO-sort#30).
+1. Turn what you told me into a real strategy spec — `<your-project-dir>/AGENTS.md` — plain
+   language, but precise about what to do and how to tell when you're done. **Your participant
+   directory lives OUTSIDE this repo clone by default** (CADS-DEMO-sort#30: your strategy is your
+   project, not untracked cruft in someone else's git tree — `git pull` here must never collide
+   with your work). I ask where you want it (suggestion: a sibling of the clone, named after your
+   participant id — the id is derived from the directory's basename), then copy
+   `templates/generated-python/generate.sh`, `handler.sh` AND `reference-handler.py` there — that
+   generic trio needs no edits before it can run. Two things still come from the repo by path:
+   the move contract (`generate.sh` finds it via `SORT_PROTOCOL_MD=<clone>/participants/CLAUDE.md`,
+   which I set in the commands I give you) and `dryrun.py` (invoked from the clone). Working
+   inside the clone under `participants/<your-id>/` still works unchanged — it's just no longer
+   the default I steer you to. I then copy `reference-handler.py` to `generated/handler.py`, and
+   **that is your first success, immediately**: a working, contract-verified baseline sorter you
+   can selftest, dry-run and race in the local arena before any model call has happened — first
+   success does not wait on a generation.
 2. Run `generate.sh`, which asks the model to REPLACE that baseline with your own strategy as a
    real, self-contained Python program (`generated/handler.py`) — code, not a promise to follow
    instructions live. `generate.sh` compile-checks what comes back (`py_compile`) and
