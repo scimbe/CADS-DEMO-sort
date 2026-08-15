@@ -62,18 +62,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.x'
-      - name: (windows diag) how dryrun actually invokes the handler
-        if: matrix.os == 'windows-latest'
-        run: |
-          set -x
-          command -v bash || echo "NO bash on PATH"
-          python3 -c "import subprocess as s; p=s.run(['bash','--version'],capture_output=True,text=True); print('BASH_SPAWN rc',p.returncode,'out',repr((p.stdout or '')[:60]),'err',repr(p.stderr[:200]))"
-          REPO="$(git rev-parse --show-toplevel)"
-          work="$RUNNER_TEMP/diag"; mkdir -p "$work/generated"; cd "$work"
-          cp "$REPO"/templates/generated-python/handler.sh .
-          cp "$REPO"/templates/generated-python/reference-handler.py generated/handler.py
-          python3 -c "import subprocess as s,json; p=s.run(['bash','./handler.sh'],input=json.dumps({'round':1,'array':[5,3,8,1],'history':[],'budgetRemaining':10,'mode':'solo','you':'diag'}),capture_output=True,text=True); print('ROUND rc',p.returncode,'| stdout',repr(p.stdout),'| stderr',repr(p.stderr[:400]))"
-
       - name: Scaffold a participant outside the clone and run the first-success checks
         run: |
           set -euxo pipefail

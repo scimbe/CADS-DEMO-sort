@@ -35,10 +35,32 @@ gate in a script.
 
 import argparse
 import json
+import os
 import random
+import shutil
 import subprocess
 import sys
 import time
+
+
+def _bash():
+    """The bash to run handlers with. A bare "bash" is correct everywhere EXCEPT Windows, where it
+    resolves to C:\\Windows\\System32\\bash.exe -- the WSL launcher stub, which (with no WSL distro
+    installed, the norm on CI and most desktops) prints "Windows Subsystem for Linux has no
+    installed distributions" and exits 1, faulting every single round. Verified as the exact cause
+    of the participant-smoke CI job's windows-latest failure (CADS-DEMO-sort#30). Every handler.sh
+    is written for Git Bash on Windows, so prefer that: the standard install locations first, then
+    any PATH bash that is NOT the System32 WSL stub."""
+    if os.name == "nt":
+        for base in (os.environ.get("ProgramFiles", r"C:\Program Files"),
+                     os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")):
+            cand = os.path.join(base, "Git", "bin", "bash.exe")
+            if os.path.isfile(cand):
+                return cand
+        found = shutil.which("bash")
+        if found and "system32" not in found.lower():
+            return found
+    return "bash"
 
 print = __import__("functools").partial(print, flush=True)  # a real LLM round takes seconds;
 # unbuffered output is the difference between "running" and "frozen" while you watch it.
@@ -123,12 +145,12 @@ def parse_handler_output(stdout, array_length):
 
 def call_handler(handler, payload, timeout_s):
     """Launched via `bash` explicitly, not exec'd directly: Windows has no shebang support and
-    cannot run a .sh file as a subprocess argv[0] at all (CADS-DEMO-sort-docs#1) -- `bash` is
-    assumed on PATH (Git Bash on Windows, native everywhere else), matching every handler's own
-    #!/usr/bin/env bash shebang."""
+    cannot run a .sh file as a subprocess argv[0] at all (CADS-DEMO-sort-docs#1). The bash used is
+    resolved by _bash() -- Git Bash on Windows (a bare "bash" there is the WSL stub; see #30),
+    native everywhere else -- matching every handler's own #!/usr/bin/env bash shebang."""
     try:
         proc = subprocess.run(
-            ["bash", handler], input=json.dumps(payload), capture_output=True, text=True, timeout=timeout_s
+            [_bash(), handler], input=json.dumps(payload), capture_output=True, text=True, timeout=timeout_s
         )
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"handler timed out after {timeout_s}s")
