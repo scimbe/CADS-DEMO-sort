@@ -16,6 +16,7 @@ YOU="$(basename "$HERE")"
 LLM="${CT_LLM_CMD:-claude}"
 OUT_DIR="$HERE/generated"
 OUT_FILE="$OUT_DIR/handler.py"
+STAGE_FILE="$OUT_FILE.new"
 mkdir -p "$OUT_DIR"
 
 [ -f "$HERE/AGENTS.md" ] || {
@@ -23,7 +24,12 @@ mkdir -p "$OUT_DIR"
   exit 1
 }
 AGENTS_MD="$(cat "$HERE/AGENTS.md")"
-PROTOCOL_MD="$(cat "$HERE/../CLAUDE.md")"
+# SORT_PROTOCOL_MD (CADS-DEMO-sort#30, "participant dir outside the clone"): by default the
+# contract is read from participants/CLAUDE.md relative to this directory -- which only works
+# when the participant directory lives INSIDE the repo clone. Point SORT_PROTOCOL_MD at the
+# contract file to run this scaffold from anywhere (your own project directory, the repo being
+# merely a reference): SORT_PROTOCOL_MD=/path/to/CADS-DEMO-sort/participants/CLAUDE.md
+PROTOCOL_MD="$(cat "${SORT_PROTOCOL_MD:-$HERE/../CLAUDE.md}")"
 
 # The QUOTED heredoc delimiter ('TEMPLATE_EOF') is load-bearing, not stylistic: AGENTS.md is
 # ordinary markdown, full of single-backtick code spans. An UNQUOTED heredoc here would have bash
@@ -51,7 +57,8 @@ need to persist across invocations):
 __AGENTS_MD__
 
 CONSTRAINTS
-- Output ONLY the Python source code, nothing else — no markdown fences, no prose before or
+- You are NOT writing a file and need no tools: your entire stdout IS the program. Output
+  ONLY the Python source code, nothing else — no markdown fences, no prose before or
   after, no explanation. The very first character of your output must be Python code.
 - The program must use only the Python standard library (json, sys). No third-party imports,
   no network access, no file I/O beyond stdin/stdout.
@@ -101,11 +108,17 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   # even when told not to.
   CODE="$(printf '%s\n' "$RAW" | sed -e '/^```/d')"
 
-  printf '%s\n' "$CODE" > "$OUT_FILE"
-  chmod +x "$OUT_FILE"
+  # Stage the draft; only a compile-clean draft ever replaces $OUT_FILE (CADS-DEMO-sort#30,
+  # intern's patch, applied as supplied: the previous version wrote the draft straight over the
+  # target, so a doubly-failed generation DESTROYED the participant's previously-working handler
+  # -- worse than never generating. Reproduced deterministically with a prose-emitting stub;
+  # with staging, the same stub leaves handler.py byte-identical and still passing --selftest.)
+  printf '%s\n' "$CODE" > "$STAGE_FILE"
+  chmod +x "$STAGE_FILE"
 
-  if "$PY" -m py_compile "$OUT_FILE" 2>"$OUT_DIR/.compile-err"; then
+  if "$PY" -m py_compile "$STAGE_FILE" 2>"$OUT_DIR/.compile-err"; then
     rm -f "$OUT_DIR/.compile-err"
+    mv "$STAGE_FILE" "$OUT_FILE"
     echo "generate.sh: wrote $OUT_FILE ($(wc -l < "$OUT_FILE") lines, compiles clean, attempt $attempt/$MAX_ATTEMPTS)"
     echo "generate.sh: verify with: $HERE/handler.sh --selftest"
     exit 0
@@ -115,10 +128,14 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
   [ "$attempt" -lt "$MAX_ATTEMPTS" ] && echo "generate.sh: regenerating..." >&2
 done
 
-# Both attempts failed: keep the last broken artifact for inspection under a name handler.sh
-# will never execute, so a later run cannot mistake it for a working handler.
-mv "$OUT_FILE" "$OUT_FILE.rejected"
+# Both attempts failed: keep the last broken draft for inspection under a name handler.sh will
+# never execute. The participant's existing handler (if any) was never touched.
+mv "$STAGE_FILE" "$OUT_FILE.rejected"
 echo "generate.sh: FAILED after $MAX_ATTEMPTS attempts -- last output kept at $OUT_FILE.rejected" >&2
-echo "generate.sh: tip: the shipped reference-handler.py is a working baseline while you retry:" >&2
-echo "generate.sh:   cp \"$HERE/reference-handler.py\" \"$OUT_FILE\"" >&2
+if [ -f "$OUT_FILE" ]; then
+  echo "generate.sh: your previous handler is untouched and still runnable." >&2
+else
+  echo "generate.sh: tip: the shipped reference-handler.py is a working baseline while you retry:" >&2
+  echo "generate.sh:   cp \"$HERE/reference-handler.py\" \"$OUT_FILE\"" >&2
+fi
 exit 1
