@@ -271,9 +271,10 @@ function renderApproved(channel, grant) {
   const versionReq = document.createElement("p");
   versionReq.className = "version-req";
   versionReq.innerHTML =
-    'Requires <strong>ct-agent v0.4.16 or newer</strong> ' +
+    'Requires <strong>ct-agent v0.4.16 or newer</strong>; <strong>v0.5.0 recommended</strong> — the first ' +
+    'release with binaries for all 8 platforms ' +
     '(<a href="https://github.com/scimbe/ct-agent/releases" target="_blank" rel="noopener">releases</a>). ' +
-    'Older versions stall 45–100 s on their first pairing after every start ' +
+    'Versions before v0.4.16 stall 45–100 s on their first pairing after every start ' +
     '(<a href="https://github.com/scimbe/CADS-Tunnel/issues/494" target="_blank" rel="noopener">CADS-Tunnel#494</a>) ' +
     '— that looks like a broken setup but isn’t.';
   identityBox.appendChild(versionReq);
