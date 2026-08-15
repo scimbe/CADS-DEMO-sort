@@ -57,12 +57,19 @@ language is completely fine:
    **that is your first success, immediately**: a working, contract-verified baseline sorter you
    can selftest, dry-run and race in the local arena before any model call has happened — first
    success does not wait on a generation.
+   **When writing the strategy, use `compare`, `swap` and `done` only for moves that should
+   actually be played.** Those three are move types in the contract, and a specification that names
+   one gets generated code that emits it. For "check how two elements relate", use wording that
+   names no move -- "whenever an element is larger than the one to its right", not "compare each
+   pair". The round input carries the whole array, so reading the order costs nothing while a
+   `compare` move costs a round and reveals nothing (CADS-DEMO-sort#30).
+
 2. Run `generate.sh`, which asks the model to REPLACE that baseline with your own strategy as a
    real, self-contained Python program (`generated/handler.py`) — code, not a promise to follow
    instructions live. `generate.sh` compile-checks what comes back (`py_compile`) and
    automatically regenerates once on garbage output, so a bad model draw costs seconds, not a
    confusing broken artifact.
-3. Verify what came back, three ways: `handler.sh --selftest` (does it speak the contract at
+3. Verify what came back, four ways: `handler.sh --selftest` (does it speak the contract at
    all), a local dry run (`dryrun.py`) that actually sorts a real array with it — run **twice** on
    the same array, to confirm it's genuinely deterministic code and not a live guess that happened
    to work once — and `dryrun.py`'s own `correction check` (same round, with and without
@@ -72,6 +79,15 @@ language is completely fine:
    all because it guessed the wrong type for it (CADS-DEMO-sort#15 — the shared contract now
    states explicitly that `correction` is always a plain string, never an object, precisely
    because a model had no way to know that otherwise).
+
+   **Fourth: `--require-no-wasted-compares`.** Run the dry run once more with it. It fails if the
+   handler spends any round on a `compare` move — which buys nothing, because the round input
+   already carries the whole array, and costs a round each time
+   (`rounds = comparisons + swaps + 1`). Measured: a strategy described without any contract
+   vocabulary still produced a specification that instructed compare moves and argued they were
+   "the honest cost of walking every adjacent pair" — 80 rounds where 28 sufficed, for identical
+   work, while every other check passed. The wording rule in step 1 prevents most of it; this
+   catches the rest.
 4. If either check fails, I don't just re-roll and hope for a cleaner sample. A failure here means
    something in `AGENTS.md` (step 1) was ambiguous or incomplete enough that the model couldn't
    turn it into reliable code — a missing edge case, an underspecified termination rule, a cursor
