@@ -236,6 +236,15 @@ def run_solo(handler, initial_array, you, budget, timeout_s, quiet=False, proper
     if not finished_correctly and round_no >= budget and not quiet:
         print(f"budget exhausted, still {array}")
 
+    if "no-wasted-compares" in property_checks and comparisons:
+        property_violations.append(
+            f"{comparisons} compare move(s) spent -- the round input already carries the whole "
+            f"array, so a compare reveals nothing the handler could not read directly and still "
+            f"costs a round (rounds = comparisons + swaps + 1). Fix this in AGENTS.md, not in the "
+            f"generated handler: state that the strategy reads the array directly and emits swaps "
+            f"only"
+        )
+
     if "optimal-swaps" in property_checks and finished_correctly and swaps != initial_inversions:
         property_violations.append(
             f"swaps ({swaps}) != initial inversions ({initial_inversions}) -- an adjacent-swap "
@@ -284,6 +293,13 @@ def main():
         "that never swaps an ordered pair achieves exactly; combine with --require-adjacent and "
         "--seed for a reproducible algorithm-identity check",
     )
+    ap.add_argument(
+        "--require-no-wasted-compares",
+        action="store_true",
+        help="FAIL if the handler emits any compare move -- the round input already carries the "
+        "whole array, so every compare costs a round and reveals nothing; use when the strategy "
+        "is meant to compute its moves rather than probe for them",
+    )
     args = ap.parse_args()
 
     if args.seed is not None:
@@ -321,6 +337,8 @@ def main():
         checks.add("adjacent")
     if args.require_optimal_swaps:
         checks.add("optimal-swaps")
+    if args.require_no_wasted_compares:
+        checks.add("no-wasted-compares")
     print("start:", array)
     result = run_solo(args.handler, array, args.you, args.budget, args.timeout, quiet=args.quiet, property_checks=checks)
     print(
