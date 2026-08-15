@@ -149,7 +149,16 @@ async function boot() {
 
 form.addEventListener("submit", async (ev) => {
   ev.preventDefault();
-  if (!currentIdentity || !channelInfo) return;
+  // Never fail silently (CADS-DEMO-sort#30: "the user sees a form that does nothing"): if the
+  // page booted without channel-info (transient outage at load time), say so and offer the fix.
+  if (!currentIdentity || !channelInfo) {
+    showNote(
+      "This page couldn't load the deployment's channel info when it opened (temporary outage?). " +
+        "Reload the page and try again.",
+      "error"
+    );
+    return;
+  }
   submitBtn.disabled = true;
   showNote("", "");
 
@@ -252,9 +261,9 @@ function renderApproved(channel, grant) {
   // side deterministic until the edge ships transport-unified pairing.
   const frontDoorLine =
     channelInfo.channelFrontDoor && channelInfo.channelFrontDoorCert
-      ? `CT_CHANNEL_FRONT_DOOR=${channelInfo.channelFrontDoor} \\\n` +
-        `CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert} \\\n` +
-        `CT_CHANNEL_FRONT_DOOR_ONLY=1 \\\n`
+      ? `export CT_CHANNEL_FRONT_DOOR=${channelInfo.channelFrontDoor}\n` +
+        `export CT_CHANNEL_FRONT_DOOR_CERT=${channelInfo.channelFrontDoorCert}\n` +
+        `export CT_CHANNEL_FRONT_DOOR_ONLY=1\n`
       : "";
   // Deliberately NO CT_CHANNEL_RELAY_GATE in this command (retest 4 finding): ct-agent's gate
   // mode still runs its channel-join ADMISSION over QUIC :4436 (the :443 gate only carries the
@@ -264,17 +273,25 @@ function renderApproved(channel, grant) {
   // healthy both sides look. Until #495 unifies them, both halves must be front-door-only --
   // exactly what this command (frontDoorLine + FRONT_DOOR_ONLY) produces. The relay-gate
   // values remain published in /api/channel-info for non-arena uses.
+  // Export-per-line, NO backslash continuations (CADS-DEMO-sort#30): two independent users in
+  // two days lost exactly the token adjacent to a `\`-continuation when copying multi-line
+  // blocks through real terminals/wrapping (a cert byte on 08-14; RELAY + RELAY_ONLY on 08-15,
+  // which cost two failed serve attempts on the taught path). One export per line has no
+  // continuation to mangle, survives partial paste with a clear error naming the missing var,
+  // and makes variable-wise diffing against other surfaces trivial.
   pre.textContent =
-    `CT_CHANNEL_ROLE=accept CT_CHANNEL_SERVE=1 CT_CHANNEL_RELAY_ONLY=1 \\\n` +
-    `CT_CHANNEL_BROKER=${channelInfo.channelBroker || "<ask the operator>"} ` +
-    `CT_CHANNEL_RELAY=${channelInfo.channelRelay || "<ask the operator>"} \\\n` +
+    `export CT_CHANNEL_ROLE=accept\n` +
+    `export CT_CHANNEL_SERVE=1\n` +
+    `export CT_CHANNEL_RELAY_ONLY=1\n` +
+    `export CT_CHANNEL_BROKER=${channelInfo.channelBroker || "<ask the operator>"}\n` +
+    `export CT_CHANNEL_RELAY=${channelInfo.channelRelay || "<ask the operator>"}\n` +
     frontDoorLine +
-    `CT_CHANNEL_GRANT=${grant} \\\n` +
-    `CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv} \\\n` +
-    `CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv} \\\n` +
-    `CT_AGENT_SERVICE_HANDLER_CMD=./handler.sh \\\n` +
-    `CT_AGENT_SERVICES=text_generation \\\n` +
-    `  ct-agent channel`;
+    `export CT_CHANNEL_GRANT=${grant}\n` +
+    `export CT_CHANNEL_HOLDER_KEY=${currentIdentity.holderPriv}\n` +
+    `export CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv}\n` +
+    `export CT_AGENT_SERVICE_HANDLER_CMD=./handler.sh\n` +
+    `export CT_AGENT_SERVICES=text_generation\n` +
+    `ct-agent channel`;
   identityBox.appendChild(pre);
 
   // CADS-DEMO-sort#27: name the ct-agent minimum version right where the serve command is, not
