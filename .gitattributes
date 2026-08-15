@@ -1,0 +1,7 @@
+# The participant path is bash + python run through Git Bash on Windows and native shells
+# elsewhere. A CRLF checkout breaks it -- the participant-smoke CI job (CADS-DEMO-sort#30) caught
+# every dryrun round faulting on windows-latest because no attributes file pinned line endings, so
+# Windows Git's core.autocrlf rewrote every script and source to CRLF on checkout. Force LF for all
+# text regardless of the checkout's autocrlf; binary files are auto-detected and unaffected. Same
+# "checks out broken on Windows" failure family as the mode-120000 symlink guard in ci.yml.
+* text=auto eol=lf
