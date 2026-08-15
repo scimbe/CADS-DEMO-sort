@@ -33,3 +33,60 @@ jobs:
         with:
           node-version: 20
       - run: node --test bridge/*.test.js
+
+  participant-smoke:
+    # CADS-DEMO-sort#30: "runs on Windows/macOS/Linux" was an assumption, not a checked claim, and
+    # two real regressions came from exactly that -- a bash-3.2/macOS heredoc-in-$() (cdddcc3) and
+    # the Windows `python3` Store-alias trap. This exercises the real participant first-success path
+    # (scaffold the template trio the way SKILL.md/README teach it, copy the shipped baseline
+    # handler, run --selftest + dryrun + determinism + correction-check) on all three OSes. No LLM
+    # call, no secret, no API budget: generate.sh is deliberately NOT run here -- the model draw is
+    # not what platform portability is about; the scripts around it are.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+      - name: Scaffold a participant outside the clone and run the first-success checks
+        run: |
+          set -euxo pipefail
+          REPO="$(git rev-parse --show-toplevel)"
+          # Resolve python the same way handler.sh does (probe by execution, never `command -v`:
+          # Windows ships a non-working `python3` Store-alias stub that `command -v` would find).
+          PY=""
+          for c in python3 python py; do
+            if "$c" -c 'import sys' >/dev/null 2>&1; then PY="$c"; break; fi
+          done
+          [ -n "$PY" ] || { echo "no working python on PATH"; exit 1; }
+
+          work="$RUNNER_TEMP/smoke-participant"
+          mkdir -p "$work/generated"
+          cd "$work"
+          cp "$REPO"/templates/generated-python/generate.sh "$REPO"/templates/generated-python/handler.sh "$REPO"/templates/generated-python/reference-handler.py .
+          export SORT_PROTOCOL_MD="$REPO/participants/CLAUDE.md"
+
+          # First success: the shipped baseline, before any generation.
+          cp reference-handler.py generated/handler.py
+          ./handler.sh --selftest
+          "$PY" "$REPO/dryrun.py" ./handler.sh --seed 42 --len 8 --quiet
+
+          # Determinism: the same seed must produce the same MOVES and result twice (it is code, not
+          # a live guess) -- the property the "run dryrun twice" instruction exists to check. The
+          # only field that legitimately varies run to run is wall-clock timing, so strip it before
+          # comparing; everything else (rounds/comparisons/swaps/faults/final array) must be equal.
+          strip_time() { sed 's/wallClockMs=[0-9]*//'; }
+          a="$("$PY" "$REPO/dryrun.py" ./handler.sh --seed 42 --len 8 --quiet | strip_time)"
+          b="$("$PY" "$REPO/dryrun.py" ./handler.sh --seed 42 --len 8 --quiet | strip_time)"
+          [ "$a" = "$b" ] || { echo "baseline handler is non-deterministic across runs"; printf '%s\n---\n%s\n' "$a" "$b"; exit 1; }
+
+          # The baseline reacts to `correction` (contract semantics), and all property checks hold.
+          "$PY" "$REPO/dryrun.py" ./handler.sh --seed 42 --len 8 --correction-check --quiet
+          "$PY" "$REPO/dryrun.py" ./handler.sh --seed 42 --len 8 --require-adjacent --require-optimal-swaps --require-no-wasted-compares --quiet
