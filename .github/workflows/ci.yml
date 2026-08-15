@@ -66,30 +66,13 @@ jobs:
         if: matrix.os == 'windows-latest'
         run: |
           set -x
-          echo "which bash:"; command -v bash || echo "NO bash on PATH"
-          echo "can native python spawn bash?"
-          python3 - <<'PY'
-          import subprocess, json, sys
-          try:
-              p = subprocess.run(["bash", "--version"], capture_output=True, text=True, timeout=20)
-              print("bash spawn rc", p.returncode, "| first line:", p.stdout.splitlines()[0] if p.stdout else "(none)", "| err:", p.stderr[:200])
-          except Exception as e:
-              print("bash spawn FAILED:", type(e).__name__, e)
-          PY
+          command -v bash || echo "NO bash on PATH"
+          python3 -c "import subprocess as s; p=s.run(['bash','--version'],capture_output=True,text=True); print('BASH_SPAWN rc',p.returncode,'out',repr((p.stdout or '')[:60]),'err',repr(p.stderr[:200]))"
           REPO="$(git rev-parse --show-toplevel)"
           work="$RUNNER_TEMP/diag"; mkdir -p "$work/generated"; cd "$work"
           cp "$REPO"/templates/generated-python/handler.sh .
           cp "$REPO"/templates/generated-python/reference-handler.py generated/handler.py
-          echo "raw handler round via bash (as dryrun does):"
-          python3 - <<'PY'
-          import subprocess, json
-          payload = {"round":1,"array":[5,3,8,1],"history":[],"budgetRemaining":10,"mode":"solo","you":"diag"}
-          try:
-              p = subprocess.run(["bash","./handler.sh"], input=json.dumps(payload), capture_output=True, text=True, timeout=30)
-              print("rc", p.returncode, "| stdout", repr(p.stdout), "| stderr", repr(p.stderr[:400]))
-          except Exception as e:
-              print("subprocess FAILED:", type(e).__name__, e)
-          PY
+          python3 -c "import subprocess as s,json; p=s.run(['bash','./handler.sh'],input=json.dumps({'round':1,'array':[5,3,8,1],'history':[],'budgetRemaining':10,'mode':'solo','you':'diag'}),capture_output=True,text=True); print('ROUND rc',p.returncode,'| stdout',repr(p.stdout),'| stderr',repr(p.stderr[:400]))"
 
       - name: Scaffold a participant outside the clone and run the first-success checks
         run: |
