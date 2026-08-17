@@ -50,10 +50,10 @@ CONTEXT
 Shared move-protocol contract (docs/protocol.md, restated via participants/CLAUDE.md):
 __PROTOCOL_MD__
 
-Strategy participant "__YOU__" must implement, stateless-per-invocation (this program is invoked
+Strategy participant "__YOU__" must implement, stateless-per-invocation — this program is invoked
 fresh every round with no memory of past calls beyond what the round-input's own `history` field
 carries — reconstruct any notion of "where you are" from that, never from a variable that would
-need to persist across invocations):
+need to persist across invocations:
 __AGENTS_MD__
 
 CONSTRAINTS
