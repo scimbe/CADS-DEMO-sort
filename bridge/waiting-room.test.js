@@ -1147,3 +1147,21 @@ test("callHandlerProcess: a timeout kills the whole process group, not just the 
   fs.rmSync(dir, { recursive: true, force: true });
   assert.ok(reaped, `grandchild ${grandchildPid} survived the timeout -- the process group was not killed`);
 });
+
+test("channelCollisionDetail: explains a holder-pair collision instead of implying a missing permission", () => {
+  // 2026-08-17: a tester hit `403 channel owned by another subject`, tried again under a
+  // second display name, got the identical error, and reasonably concluded their account
+  // had to be authorised for the arena channel. There is nothing to authorise -- every
+  // participant gets their OWN channel, and the id is derived from the holder PAIR, so a
+  // different NAME cannot change it. The control-plane wording reads like a permission
+  // problem; this freezes the wording that says what actually happened and what to do.
+  const ch = "ab".repeat(32);
+  const msg = require("./server.js").channelCollisionDetail(ch);
+
+  assert.match(msg, /collision, not a missing permission/i, "names the real cause");
+  assert.match(msg, /different participant NAME cannot change it/i,
+    "pre-empts the retry that the tester actually made twice");
+  assert.ok(msg.includes(ch), "names the channel id -- the next step needs it");
+  assert.match(msg, new RegExp(`DELETE /me/channels/${ch}`), "gives the exact remedy");
+  assert.match(msg, /freshly generated holder keypair/i, "and the cheaper remedy first");
+});

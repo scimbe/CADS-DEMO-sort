@@ -1256,6 +1256,19 @@ async function cpFetch(path, body) {
  *  the real failure, don't pretend it worked" discipline CADS-webconference-demo's tryRegister
  *  uses. Throws only on a genuine local/programming error (e.g. mintGrants' own process spawn
  *  failure) -- HTTP-level control-plane failures are returned, not thrown. */
+/** The wording for a holder-pair channel collision (see the call site for the incident).
+ *  Pure, so the message itself is testable without minting a grant or reaching a control
+ *  plane -- the message is the whole point of this branch, so it is what gets frozen. */
+function channelCollisionDetail(channelHex) {
+  return (
+    `channel ${channelHex} is already registered under a different account. ` +
+    `This is a collision, not a missing permission: the channel id is derived from ` +
+    `your holder key, so re-joining under a different participant NAME cannot change ` +
+    `it. Either join with a freshly generated holder keypair, or have the current ` +
+    `owner delete that channel (DELETE /me/channels/${channelHex}).`
+  );
+}
+
 async function automateApproval(pending) {
   const bridgeHolderPub = process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY;
   const bridgeHolderPriv = Buffer.from(readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY"), "hex");
@@ -1271,6 +1284,18 @@ async function automateApproval(pending) {
 
   const reg = await cpFetch("/me/channels", { channel: minted.channel, operator_pubkey: minted.operatorPub });
   if (reg.status !== 200) {
+    // The channel id is derived deterministically from the holder PAIR (bridge holder +
+    // participant holder), so a 403 here does not mean "this account lacks permission" --
+    // it means this exact holder pair already has a channel registered under some other
+    // subject. A tester hit this on 2026-08-17, tried twice under two different display
+    // names, got the identical error (same holder key -> same channel id) and reasonably
+    // concluded their account needed to be "authorised for the channel". There is no such
+    // thing to authorise: every participant gets their OWN channel. The raw control-plane
+    // wording ("channel owned by another subject") reads like a permission problem, so say
+    // what it actually is and name the id the next step needs.
+    if (reg.status === 403) {
+      return { ok: false, detail: channelCollisionDetail(minted.channel) };
+    }
     return { ok: false, detail: `POST /me/channels -> ${reg.status} ${reg.text}`.slice(0, 400) };
   }
 
@@ -1879,6 +1904,9 @@ function main() {
 if (require.main === module) main();
 
 module.exports = {
+  // Exported for the collision-message test: the raw control-plane 403 misled a tester
+  // into believing their account needed authorising, so the wording is now a contract.
+  channelCollisionDetail,
   loadParticipants,
   parseParticipantsJson,
   addApprovedParticipant,
