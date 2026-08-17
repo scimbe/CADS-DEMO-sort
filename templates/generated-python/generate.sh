@@ -79,6 +79,12 @@ PROMPT="${TEMPLATE//__PROTOCOL_MD__/$PROTOCOL_MD}"
 PROMPT="${PROMPT//__AGENTS_MD__/$AGENTS_MD}"
 PROMPT="${PROMPT//__YOU__/$YOU}"
 
+# Tester feedback (CADS-DEMO-sort-docs): "what exactly does the model get sent" was answerable only
+# by reading this file's own TEMPLATE_EOF block by hand and mentally substituting your AGENTS.md in.
+# Write the fully assembled prompt out so it's one `cat` away instead -- purely diagnostic, never
+# read back in by this script.
+printf '%s\n' "$PROMPT" > "$OUT_DIR/.last-prompt.txt"
+
 # Same execution-probe as handler.sh: `command -v python3` finds Windows' Store alias stub, so
 # probe by actually running it (CADS-DEMO-sort-docs#1, second round).
 PY=""
@@ -121,6 +127,7 @@ for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     mv "$STAGE_FILE" "$OUT_FILE"
     echo "generate.sh: wrote $OUT_FILE ($(wc -l < "$OUT_FILE") lines, compiles clean, attempt $attempt/$MAX_ATTEMPTS)"
     echo "generate.sh: verify with: $HERE/handler.sh --selftest"
+    echo "generate.sh: curious what was actually sent? cat $OUT_DIR/.last-prompt.txt"
     exit 0
   fi
   echo "generate.sh: attempt $attempt/$MAX_ATTEMPTS produced code that does not compile:" >&2
