@@ -324,7 +324,11 @@ function renderApproved(channel, grant) {
     `export CT_CHANNEL_NOISE_KEY=${currentIdentity.noisePriv}\n` +
     `export CT_AGENT_SERVICE_HANDLER_CMD=./handler.sh\n` +
     `export CT_AGENT_SERVICES=text_generation\n` +
-    `ct-agent channel`;
+    // `./ct-agent`, not bare `ct-agent` (tester-reported, CADS-DEMO-sort-docs feedback): every
+    // download path this project documents puts the binary in the participant's own directory,
+    // never on PATH -- same reasoning as CT_AGENT_SERVICE_HANDLER_CMD=./handler.sh two lines up.
+    // A bare `ct-agent` here fails "command not found" for anyone who followed the docs exactly.
+    `./ct-agent channel`;
   identityBox.appendChild(pre);
   addCopyButton(pre);
 
