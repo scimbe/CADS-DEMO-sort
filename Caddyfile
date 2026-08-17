@@ -22,6 +22,18 @@
 		X-Content-Type-Options "nosniff"
 	}
 
+	# The app shell carries no version in its filenames, so without an explicit policy a
+	# browser falls back to HEURISTIC freshness (RFC 9111: roughly a tenth of the file's age)
+	# and can keep serving a stale `join.js` for hours after a deploy. That is not theoretical
+	# -- the Copy button on the join page sat in a deployed build that returning visitors did
+	# not see, and "why don't I have it yet" is exactly what that looks like from outside.
+	#
+	# `no-cache` means "revalidate before use", NOT "don't store": the ETag and Last-Modified
+	# already served here make that a conditional request answered with a 304 in the common
+	# case, so the cost is one round trip, not a re-download.
+	@shell path *.html *.js *.css /
+	header @shell Cache-Control "no-cache"
+
 	@api path /run/* /race /partition /participants /healthz
 	reverse_proxy @api sort-demo-bridge:8789
 
