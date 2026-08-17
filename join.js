@@ -70,6 +70,38 @@ function memberNoiseAttestBytes(channelHex, holderHex, noisePubHex) {
   return concatBytes(lenPrefix, domain, hexToBytes(channelHex), hexToBytes(holderHex), hexToBytes(noisePubHex));
 }
 
+// Tester-reported gap (CADS-DEMO-sort-docs feedback): the .identity-priv blocks are exactly the
+// multi-line export text a participant needs to paste into their own shell, and the surrounding
+// comments in this file already document real users losing a token to manual selection (a `\`-
+// continuation, or an incomplete drag-select of a wrapped block). navigator.clipboard.writeText
+// copies the FULL element.textContent in one action, which a manual select can't guarantee.
+function addCopyButton(preEl) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "copy-btn";
+  btn.textContent = "Copy";
+  let resetTimer = null;
+  btn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(preEl.textContent);
+      btn.textContent = "Copied";
+      btn.dataset.copied = "1";
+    } catch (e) {
+      // Clipboard API needs a secure context (https, or localhost) -- both this page's
+      // documented deployment (Caddy/https) and the local-testing path (127.0.0.1) qualify, but
+      // fail loud rather than silently doing nothing if some other origin ever serves this.
+      btn.textContent = "Copy failed — select manually";
+    }
+    if (resetTimer) clearTimeout(resetTimer);
+    resetTimer = setTimeout(() => {
+      btn.textContent = "Copy";
+      delete btn.dataset.copied;
+    }, 2000);
+  });
+  preEl.insertAdjacentElement("afterend", btn);
+  return btn;
+}
+
 function renderIdentity(identity) {
   identityBox.innerHTML = "";
 
@@ -107,6 +139,7 @@ function renderIdentity(identity) {
     `CT_CHANNEL_NOISE_KEY=${identity.noisePriv}\n` +
     `CT_CHANNEL_NOISE_PUBKEY=${identity.noisePub}`;
   identityBox.appendChild(priv);
+  addCopyButton(priv);
 
   const regenBtn = document.createElement("button");
   regenBtn.type = "button";
@@ -293,6 +326,7 @@ function renderApproved(channel, grant) {
     `export CT_AGENT_SERVICES=text_generation\n` +
     `ct-agent channel`;
   identityBox.appendChild(pre);
+  addCopyButton(pre);
 
   // CADS-DEMO-sort#27: name the ct-agent minimum version right where the serve command is, not
   // only in the docs how-tos. An older binary hits the CADS-Tunnel#494 ack-deadlock -- 45-100s
