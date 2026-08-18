@@ -1121,6 +1121,45 @@ test("PersistentRoleClient: an IDLE session death triggers a proactive pre-warm 
   client._kill();
 });
 
+test("callHandlerProcess: caps concurrent spawns and queues the rest, without dropping or deadlocking any of them (sort#44)", async () => {
+  await withEnv({ SORT_MAX_CONCURRENT_SPAWNS: "3", SORT_MAX_QUEUED_SPAWNS: "50" }, async () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { callHandlerProcess } = require("./server.js");
+
+    // Each call increments a shared counter on start and decrements on exit, recording the peak
+    // it ever observed to its own output line -- a real, measured high-water mark of how many ran
+    // AT ONCE, not an assumption. `flock` serializes the read-increment-write so concurrent shells
+    // don't race each other updating the same counter file.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sort-spawn-cap-"));
+    const counterFile = path.join(dir, "counter");
+    const peakFile = path.join(dir, "peak");
+    fs.writeFileSync(counterFile, "0");
+    fs.writeFileSync(peakFile, "0");
+    const cmd =
+      `flock ${counterFile} -c '` +
+      `n=$(($(cat ${counterFile})+1)); echo $n > ${counterFile}; ` +
+      `p=$(cat ${peakFile}); [ $n -gt $p ] && echo $n > ${peakFile}; true` +
+      `'; ` +
+      `sleep 0.3; ` +
+      `flock ${counterFile} -c 'echo $(($(cat ${counterFile})-1)) > ${counterFile}'; ` +
+      `echo '{"ok":true}'`;
+
+    const N = 9; // 3x the cap, so the queue is genuinely exercised, not just the fast path
+    const results = await Promise.all(
+      Array.from({ length: N }, () => callHandlerProcess(cmd, { probe: true }, 5000))
+    );
+
+    assert.equal(results.length, N, "every queued call must eventually resolve -- none dropped");
+    for (const r of results) assert.equal(r.trim(), '{"ok":true}');
+
+    const peak = Number(fs.readFileSync(peakFile, "utf8").trim());
+    assert.ok(peak <= 3, `observed ${peak} concurrent handlers running at once, cap was 3`);
+    assert.ok(peak >= 1, "sanity: the counter mechanism itself must have recorded something");
+
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+});
+
 test("callHandlerProcess: a timeout kills the whole process group, not just the direct `sh` child", async (t) => {
   if (process.platform !== "linux") return t.skip("needs /proc to observe real process state");
   const { callHandlerProcess } = require("./server.js");

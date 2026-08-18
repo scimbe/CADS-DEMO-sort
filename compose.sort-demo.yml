@@ -135,7 +135,9 @@ services:
       context: .
       dockerfile: Agent.Dockerfile
       args:
-        - CT_AGENT_REF=${CT_AGENT_REF:-main}
+        # sort#42: empty (unset) means Agent.Dockerfile resolves the latest ct-agent release tag
+        # itself at build time. Set CT_AGENT_REF in the environment only to pin a specific tag.
+        - CT_AGENT_REF=${CT_AGENT_REF:-}
     environment:
       - CT_AGENT_MODE=browser
       - CT_AGENT_HOSTNAME=sort.bunsenbrenner.org

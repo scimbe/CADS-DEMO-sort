@@ -7,8 +7,24 @@ FROM rust:1-slim-bookworm AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
-ARG CT_AGENT_REF=main
-RUN git clone https://github.com/scimbe/ct-agent.git /build && cd /build && git checkout "${CT_AGENT_REF}"
+# sort#42: this used to default to `main` (an unreviewed, unversioned moving target — any commit
+# merged upstream landed in the public tunnel agent on the next build, with no changelog and no
+# reproducibility). The operator's call: don't pin to a fixed version either, since that goes stale
+# (bridge/Dockerfile's own v0.4.15 pin had drifted 5 releases behind ct-agent's real latest, v0.5.4,
+# by the time this was reviewed) -- track the latest RELEASE TAG instead. A tag only exists once
+# upstream has actually cut a release, so this is real version tracking, not `main`'s arbitrary-commit
+# exposure -- and the resolved tag is printed below, so every build log records exactly what shipped.
+# CT_AGENT_REF still overrides to a specific tag when that's ever needed (a bad release, a pin during
+# investigation); leave it unset for the normal "always latest release" behavior.
+ARG CT_AGENT_REF=
+RUN set -eu; \
+    ref="${CT_AGENT_REF:-}"; \
+    if [ -z "$ref" ]; then \
+      ref="$(git ls-remote --tags --refs --sort='-v:refname' https://github.com/scimbe/ct-agent.git | head -1 | sed 's#.*refs/tags/##')"; \
+      [ -n "$ref" ] || { echo "could not resolve the latest ct-agent release tag" >&2; exit 1; }; \
+    fi; \
+    echo "building ct-agent @ ${ref}"; \
+    git clone --depth 1 --branch "$ref" https://github.com/scimbe/ct-agent.git /build
 WORKDIR /build
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \

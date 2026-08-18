@@ -34,29 +34,39 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
     && cp target/release/sort-channel-grant /tmp/sort-channel-grant
 
-# CT_AGENT_REF pins a real tag, not `main`, so this image doesn't silently pick up an unreleased
-# breaking change -- bump this deliberately when a new ct-agent release is worth pulling in.
+# sort#42: this used to pin a fixed tag ("bump this deliberately when a new release is worth pulling
+# in"), on the reasoning that `main` is an unreviewed moving target. True, but a fixed pin has the
+# opposite failure mode: it goes stale silently. It had drifted from v0.4.15 to ct-agent's actual
+# latest, v0.5.4 -- five releases -- by the time this was reviewed, with no fixes/bumps tracked here
+# since. The operator's call: track the latest RELEASE TAG automatically instead of either extreme.
+# A tag only exists once upstream has cut and (per its own release process) reviewed a release, so
+# this keeps the "not `main`" property while never going stale -- and the resolved tag is printed at
+# build time, so every build log still records exactly what shipped. CT_AGENT_REF still overrides to
+# a specific tag for the rare case that needs pinning (e.g. investigating a regression a new release
+# introduced); leave it unset for the normal "always latest release" behavior.
 #
-# v0.4.4 -> v0.4.6 (2026-08-13): three fixes this bridge's own `ct-agent channel` calls need, all
-# from the ct-agent#15 connectivity investigation.
-#   * v0.4.5 `318ec1a` -- a low-DPI-visibility `:443` dial rung (ordinary `h2` ALPN under a reserved
-#     SNI) for networks that fingerprint and drop the distinctive `ct-edge-channel` ALPN, plus
-#     retiring the `SNI=localhost` giveaway. Needs the matching edge route, live since `228ee31`.
-#   * v0.4.6 `600ed5c` -- the dial ladder used to STOP at the first `Refused` rung instead of
-#     falling through to the next. Without it the new rung above is unreachable in exactly the case
-#     it exists for, so v0.4.5 alone would have been inert here.
-#   * v0.4.6 `eb4de4d` -- the ping-capable `'K'` TCP-fallback role: real payload traffic on parked
-#     fallback connections, so a middlebox that ignores ACK-only keepalives stops silently killing
-#     them. Measured on this very deployment: a parked connection dies after ~10-15s idle (5s
-#     request spacing -> 4/4 OK, 20s spacing -> 1/4). The `'K'` ping interval is 8s, deliberately
-#     just under that threshold.
+# Historical pins that mattered functionally, kept for context (superseded by auto-latest, which
+# picks these up automatically going forward):
+#   v0.4.4 -> v0.4.6 (2026-08-13): three fixes this bridge's own `ct-agent channel` calls needed,
+#   from the ct-agent#15 connectivity investigation -- a low-DPI-visibility `:443` dial rung
+#   (`318ec1a`), the dial ladder falling through past a `Refused` rung instead of stopping
+#   (`600ed5c`), and the ping-capable `'K'` TCP-fallback role for middleboxes that kill idle
+#   ACK-only keepalives (`eb4de4d`, measured on this deployment: ~10-15s idle death, 8s ping
+#   interval deliberately under that).
 FROM rust:1-slim-bookworm AS ct-agent-builder
-ARG CT_AGENT_REF=v0.4.15
+ARG CT_AGENT_REF=
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev cmake protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-RUN git clone --depth 1 --branch "$CT_AGENT_REF" https://github.com/scimbe/ct-agent.git .
+RUN set -eu; \
+    ref="${CT_AGENT_REF:-}"; \
+    if [ -z "$ref" ]; then \
+      ref="$(git ls-remote --tags --refs --sort='-v:refname' https://github.com/scimbe/ct-agent.git | head -1 | sed 's#.*refs/tags/##')"; \
+      [ -n "$ref" ] || { echo "could not resolve the latest ct-agent release tag" >&2; exit 1; }; \
+    fi; \
+    echo "building ct-agent @ ${ref}"; \
+    git clone --depth 1 --branch "$ref" https://github.com/scimbe/ct-agent.git .
 # native/ is a member of the workspace rooted at ./Cargo.toml (not its own standalone crate), so
 # `cargo build`'s target/ always resolves to the WORKSPACE root regardless of --manifest-path or
 # cwd -- confirmed live: a `cd native && cargo build --release` left nothing at native/target/
