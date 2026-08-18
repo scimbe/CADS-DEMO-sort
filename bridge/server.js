@@ -683,7 +683,13 @@ class PersistentRoleClient {
       const lifeMs = Date.now() - this.spawnedAt;
       const wasCurrent = this.child === child;
       if (wasCurrent) this.child = null;
-      this._log(`child pid ${child.pid} closed (code ${code}) after ${Math.round(lifeMs / 1000)}s${this.pendingResolve ? " during an active call" : " while idle"}`);
+      // sort#25 follow-up (2026-08-18): stderrTail was already captured but only ever LOGGED on
+      // the "died during an active call" branch below -- every idle death (the overwhelming
+      // majority: ~3400/day measured) discarded ct-agent's own exit reason. Days of these logs
+      // said WHAT (closed, code, how long alive) but never WHY. Log it here too so the next
+      // death is diagnosable instead of guessed at.
+      const tail = this.stderrTail.trim() ? ` -- stderr: ${this.stderrTail.trim().split("\n").pop()}` : "";
+      this._log(`child pid ${child.pid} closed (code ${code}) after ${Math.round(lifeMs / 1000)}s${this.pendingResolve ? " during an active call" : " while idle"}${tail}`);
       if (this.pendingResolve) {
         this.pendingResolve(
           new Error(`role command exited ${code}${this.stderrTail.trim() ? `: ${this.stderrTail.trim().split("\n").pop()}` : ""}`)
