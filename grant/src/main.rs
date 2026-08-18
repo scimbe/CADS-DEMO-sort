@@ -58,13 +58,22 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+// sort#43: slices `s` as BYTES, never as a `&str`. `&str` indexing panics if a boundary doesn't
+// land on a UTF-8 char boundary -- a 64-byte input containing one multi-byte codepoint (plus 62
+// ASCII hex chars) passes the length check above and then panics here, and Rust's slice-boundary
+// panic message echoes the offending string verbatim. This is used to decode `--operator-private`
+// too, so that panic could echo secret key material to stderr. Byte-slicing never panics this way,
+// and no branch below ever includes `s`/`pair` in its error text.
 fn from_hex32(s: &str) -> Result<[u8; 32], String> {
     if s.len() != 64 {
-        return Err(format!("expected 64 hex chars (32 bytes), got {}", s.len()));
+        return Err(format!("expected 64 hex chars (32 bytes), got {} bytes", s.len()));
     }
+    let bytes = s.as_bytes();
     let mut out = [0u8; 32];
     for (i, b) in out.iter_mut().enumerate() {
-        *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| "invalid hex character".to_string())?;
+        let pair = &bytes[2 * i..2 * i + 2];
+        let digits = std::str::from_utf8(pair).map_err(|_| "invalid hex character".to_string())?;
+        *b = u8::from_str_radix(digits, 16).map_err(|_| "invalid hex character".to_string())?;
     }
     Ok(out)
 }
@@ -384,5 +393,29 @@ mod tests {
 
     fn hex_decode(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    }
+
+    #[test]
+    fn from_hex32_rejects_non_ascii_input_cleanly_instead_of_panicking() {
+        // sort#43: one 4-byte UTF-8 emoji + 60 ASCII 'a's = 64 BYTES, so the old `s.len() != 64`
+        // guard (a byte-length check) passed straight through to the `&str` slice at `[0..2]` --
+        // squarely inside the emoji's 4-byte encoding, not on a char boundary, which panicked.
+        // This must return a clean Err instead.
+        let mut s = String::from('\u{1F600}'); // 4 bytes
+        s.push_str(&"a".repeat(60)); // 4 + 60 = 64 bytes total
+        assert_eq!(s.len(), 64);
+        let result = from_hex32(&s);
+        assert!(result.is_err(), "must error, not panic, on non-ASCII input");
+    }
+
+    #[test]
+    fn from_hex32_error_never_echoes_the_input() {
+        // The same function decodes --operator-private, so its error text must never repeat back
+        // any part of a rejected value -- that value may be a real secret.
+        let mut s = String::from('\u{1F600}');
+        s.push_str(&"a".repeat(60));
+        let err = from_hex32(&s).unwrap_err();
+        assert!(!err.contains('\u{1F600}'));
+        assert!(!err.contains(&s));
     }
 }

@@ -115,7 +115,20 @@
 				uri /gate/check
 				copy_headers X-Gate-Email
 			}
-			reverse_proxy sort-demo-bridge:8789
+			reverse_proxy sort-demo-bridge:8789 {
+				# sort#47: POST /api/join-requests is rate-limited per-IP by the bridge's own
+				# clientIp() (server.js), which reads X-Forwarded-For -- a header a client can set
+				# to anything, minting a fresh "IP" per request to defeat that limiter entirely.
+				# header_up (unlike request_header) REPLACES the outbound header outright rather
+				# than appending, so this discards whatever the client sent and substitutes Caddy's
+				# own observed remote peer -- non-spoofable from the client's side, regardless of
+				# how many hops the tunnel itself puts between here and the real browser. Scoped to
+				# this one reverse_proxy's own subdirective, not a bare top-level `header`/
+				# `request_header`, specifically to avoid the cross-directive Caddyfile-priority
+				# gotcha the X-Gate-Email strip above already needed route{} to work around --
+				# header_up runs as part of THIS proxy call, not subject to that ordering question.
+				header_up X-Forwarded-For {http.request.remote.host}
+			}
 		}
 	}
 

@@ -447,7 +447,45 @@ function persistPendingGrants(pendingGrantDelivery) {
  *  That half is fixed in bridge/Dockerfile (tini as PID 1, which reaps); BOTH halves are needed --
  *  an init alone still leaves the grandchild running, and a group kill alone still leaves a
  *  zombie, since the grandchild is orphaned the instant its `sh` parent dies. */
+// sort#44: caps how many local-handler subprocesses can be alive at once, across ALL requests.
+// /run, /race, /partition are intentionally public (the spectator/participant API,
+// Caddyfile's @api matcher), and runRaceSession/runPartitionSession already run every
+// participant's round loop CONCURRENTLY within one request (Promise.all in server.lib.js) --
+// so a single /race?ids=a,b,c,... already fans out N simultaneous spawns, and nothing bounded
+// how many such requests could be in flight together. resolveBudget's MAX_BUDGET only clamps
+// rounds WITHIN one request, not concurrent spawns ACROSS requests. Queueing (not rejecting)
+// past the cap: a spawn is typically done in well under a second, so a queued caller still
+// gets a real result shortly, and the demo's "it eventually works" feel survives a burst --
+// unlike a 429, which would surface as a broken round to an ordinary spectator running two
+// races in two tabs. The queue itself is bounded (below) so it can't become its own memory DoS.
+const MAX_CONCURRENT_HANDLER_SPAWNS = Number(process.env.SORT_MAX_CONCURRENT_SPAWNS) || 16;
+const MAX_QUEUED_HANDLER_SPAWNS = Number(process.env.SORT_MAX_QUEUED_SPAWNS) || 200;
+let activeHandlerSpawns = 0;
+const spawnQueue = [];
+function acquireSpawnSlot() {
+  if (activeHandlerSpawns < MAX_CONCURRENT_HANDLER_SPAWNS) {
+    activeHandlerSpawns++;
+    return Promise.resolve();
+  }
+  if (spawnQueue.length >= MAX_QUEUED_HANDLER_SPAWNS) {
+    return Promise.reject(new Error("bridge is at capacity (too many rounds in flight) -- try again shortly"));
+  }
+  return new Promise((resolve) => spawnQueue.push(resolve));
+}
+function releaseSpawnSlot() {
+  const next = spawnQueue.shift();
+  if (next) {
+    next(); // hand the slot straight to the next waiter -- activeHandlerSpawns stays unchanged
+    return;
+  }
+  activeHandlerSpawns--;
+}
+
 function callHandlerProcess(cmd, input, timeoutMs = TIMEOUT_MS) {
+  return acquireSpawnSlot().then(() => spawnAndAwaitHandler(cmd, input, timeoutMs).finally(releaseSpawnSlot));
+}
+
+function spawnAndAwaitHandler(cmd, input, timeoutMs) {
   return new Promise((resolve, reject) => {
     const child = spawn("sh", ["-c", cmd], { stdio: ["pipe", "pipe", "pipe"], detached: true });
     let stdout = "";
@@ -988,7 +1026,10 @@ function automationConfigured() {
     (serviceClientSecret() && process.env.SORT_OIDC_ISSUER_BASE) || currentOidcToken()
   );
   return Boolean(
-    readSecret("SORT_CHANNEL_OPERATOR_KEY") &&
+    // sort#43: specifically the _FILE form -- mintGrants() now refuses the plain-env-var fallback
+    // (see its own comment), so reporting "configured" for a deployment that only set the plain
+    // var would be a false positive that fails later, deep inside the first real mint call.
+    process.env.SORT_CHANNEL_OPERATOR_KEY_FILE &&
       readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY") &&
       readSecret("SORT_CHANNEL_BRIDGE_NOISE_KEY") &&
       process.env.SORT_CP_URL &&
@@ -1088,9 +1129,22 @@ function mintGrants(holderAHex, holderBHex) {
   return new Promise((resolve, reject) => {
     const grantBin = process.env.SORT_GRANT_BIN || "/usr/local/bin/sort-channel-grant";
     const operatorKeyFile = process.env.SORT_CHANNEL_OPERATOR_KEY_FILE;
-    const operatorArgs = operatorKeyFile
-      ? ["--operator-private-file", operatorKeyFile]
-      : ["--operator-private", readSecret("SORT_CHANNEL_OPERATOR_KEY")];
+    // sort#43: refuse rather than fall back to `--operator-private <hex>`. That form puts the
+    // operator's private key on this process's own argv -- visible to any co-resident process via
+    // e.g. /proc/<pid>/cmdline for the duration of every mint call (documented in
+    // grant/src/main.rs's own doc comment) -- and, on a grant-binary failure, execFile's Error
+    // re-embeds the full argv it ran, so the same key would additionally land in whatever catches
+    // and logs that error. Fail closed here instead: automationConfigured() (below) already
+    // requires this exact var, so a deployment that reaches this function without it set is
+    // misconfigured, not merely missing an optional secret.
+    if (!operatorKeyFile) {
+      return reject(new Error(
+        "SORT_CHANNEL_OPERATOR_KEY_FILE is not set -- refusing to pass the operator private key as " +
+          "a CLI argument. Set SORT_CHANNEL_OPERATOR_KEY_FILE to a file path (never " +
+          "SORT_CHANNEL_OPERATOR_KEY alone) to mint grants."
+      ));
+    }
+    const operatorArgs = ["--operator-private-file", operatorKeyFile];
     execFile(
       grantBin,
       [holderAHex, holderBHex, ...operatorArgs, "--ttl-secs", String(GRANT_TTL_SECS)],

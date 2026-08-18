@@ -38,6 +38,7 @@ import json
 import os
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -143,21 +144,61 @@ def parse_handler_output(stdout, array_length):
     return validate_move(parsed, array_length)
 
 
+def _kill_handler_tree(proc):
+    """sort#46: kill the WHOLE process tree a timed-out handler started, not just the immediate
+    `bash` child. Mirrors bridge/server.js's callHandlerProcess, which spawns detached and does
+    process.kill(-child.pid, "SIGKILL") on timeout for the identical reason: every live-decision
+    template (claude-code/codex/gemini-cli/opencode) spawns a further model-CLI child from inside
+    bash, so killing only bash orphans that child -- and this script's own docstring claims to be
+    "a faithful port" of the round loop, which server.js's own comments call this hardening
+    load-bearing for. subprocess.run()'s default TimeoutExpired handling only ever kills the
+    immediate child (Popen.kill()), which is exactly the gap this closes."""
+    if os.name == "posix":
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # the group already exited between the timeout firing and this call
+    else:
+        # No process-group equivalent of killpg on Windows; taskkill /T walks the tree by PID.
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
+
+
 def call_handler(handler, payload, timeout_s):
     """Launched via `bash` explicitly, not exec'd directly: Windows has no shebang support and
     cannot run a .sh file as a subprocess argv[0] at all (CADS-DEMO-sort-docs#1). The bash used is
     resolved by _bash() -- Git Bash on Windows (a bare "bash" there is the WSL stub; see #30),
-    native everywhere else -- matching every handler's own #!/usr/bin/env bash shebang."""
+    native everywhere else -- matching every handler's own #!/usr/bin/env bash shebang.
+
+    Uses Popen (not subprocess.run) so a timeout can kill the whole process tree -- see
+    _kill_handler_tree. start_new_session=True (POSIX) / CREATE_NEW_PROCESS_GROUP (Windows) put the
+    handler in its own group/tree so that kill never touches this script's own process."""
+    popen_kwargs = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+    else:
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
+    proc = subprocess.Popen(
+        [_bash(), handler],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **popen_kwargs,
+    )
     try:
-        proc = subprocess.run(
-            [_bash(), handler], input=json.dumps(payload), capture_output=True, text=True, timeout=timeout_s
-        )
+        stdout, stderr = proc.communicate(input=json.dumps(payload), timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        _kill_handler_tree(proc)
+        try:
+            proc.communicate(timeout=2)  # reap; drop any output racing the kill
+        except Exception:
+            pass
         raise RuntimeError(f"handler timed out after {timeout_s}s")
-    if not proc.stdout.strip():
-        detail = proc.stderr.strip()
+    if not stdout.strip():
+        detail = (stderr or "").strip()
         raise RuntimeError(f"handler produced no output, exit {proc.returncode}" + (f" -- stderr: {detail}" if detail else ""))
-    return proc.stdout
+    return stdout
 
 
 def run_round(handler, round_no, array, history, budget_remaining, mode, you, timeout_s):
