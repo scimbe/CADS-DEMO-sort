@@ -21,6 +21,24 @@ function ensureWasmInit() {
   return wasmInitPromise || (wasmInitPromise = init({ module_or_path: "./pkg/ct_agent_wasm_bg.wasm" }));
 }
 
+// CADS-Tunnel#589: the edge's TCP-fallback connection pool (browser-plane, UDP blocked from
+// here) has a hard 1.5s window to hand a request a parked agent connection; each parked
+// connection serves exactly one request before the agent has to re-park, so real traffic races
+// that window and intermittently fails the CONNECTION ITSELF -- the bridge never sees the
+// request at all in that case, so retrying is always safe here, the join POST included, not
+// just the GETs. `fetch()` throwing (a TypeError, not an HTTP error response) is exactly this
+// failure mode; a real 4xx/5xx from the bridge is a genuine answer and is never retried.
+async function fetchResilient(url, opts, retries = 2, backoffMs = 500) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fetch(url, opts);
+    } catch (e) {
+      if (attempt >= retries) throw e;
+      await new Promise((r) => setTimeout(r, backoffMs * (attempt + 1)));
+    }
+  }
+}
+
 function loadOrCreateIdentity() {
   const existing = localStorage.getItem(STORAGE_KEY);
   if (existing) return JSON.parse(existing);
@@ -168,7 +186,7 @@ async function boot() {
   renderIdentity(currentIdentity);
 
   try {
-    const resp = await fetch("/api/channel-info");
+    const resp = await fetchResilient("/api/channel-info");
     channelInfo = await resp.json();
     if (!channelInfo.operatorPubkey || !channelInfo.bridgeHolderPubkey) {
       showNote("This deployment hasn't configured its channel identity yet -- ask the operator.", "error");
@@ -207,7 +225,7 @@ form.addEventListener("submit", async (ev) => {
       noisePub: currentIdentity.noisePub,
       attestation: bytesToHex(signature),
     };
-    const resp = await fetch("/api/join-requests", {
+    const resp = await fetchResilient("/api/join-requests", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),

@@ -324,6 +324,25 @@
  const BRIDGE = (new URLSearchParams(location.search).get("bridge") || "").replace(/\/+$/, "");
  const api = (path) => BRIDGE + path;
 
+ // CADS-Tunnel#589: the edge's TCP-fallback connection pool (browser-plane tunnels with UDP
+ // blocked, which is how this deployment reaches the internet) has a hard 1.5s window to hand a
+ // request a parked agent connection; each parked connection serves exactly one request before
+ // the agent has to re-park, so real traffic races that window and intermittently fails the
+ // CONNECTION ITSELF -- the origin (this bridge) never sees the request at all in that case, so
+ // retrying is always safe here, POSTs included, not just idempotent GETs. `fetch()` throwing
+ // (a TypeError, not an HTTP error response) is exactly this failure mode; a real 4xx/5xx from
+ // the bridge is a genuine answer and is never retried.
+ async function fetchResilient(url, opts, retries = 2, backoffMs = 500) {
+  for (let attempt = 0; ; attempt++) {
+   try {
+    return await fetch(url, opts);
+   } catch (e) {
+    if (attempt >= retries) throw e;
+    await new Promise((r) => setTimeout(r, backoffMs * (attempt + 1)));
+   }
+  }
+ }
+
  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
  const lightScheme = window.matchMedia("(prefers-color-scheme: light)");
 
@@ -1136,7 +1155,7 @@
   state.abort = new AbortController();
   let res;
   try {
-   res = await fetch(api(url), { method: "POST", signal: state.abort.signal });
+   res = await fetchResilient(api(url), { method: "POST", signal: state.abort.signal });
   } catch (e) {
    throw new Error(`could not reach the bridge (${e.message}). ` +
     (BRIDGE ? `Configured bridge: ${BRIDGE}` : "Serve this page from the bridge's own origin, or append ?bridge=http://host:port"));
@@ -1279,7 +1298,7 @@
 
  async function loadRoster() {
   try {
-   const res = await fetch(api("/participants"));
+   const res = await fetchResilient(api("/participants"));
    if (!res.ok) throw new Error(`HTTP ${res.status}`);
    state.roster = await res.json();
    const liveIds = new Set(state.roster.map((p) => p.you));
