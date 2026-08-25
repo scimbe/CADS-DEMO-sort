@@ -168,10 +168,26 @@ async function runRound({ callHandler, round, array, history, budgetRemaining, m
 }
 
 /**
- * Run a full solo participant to completion (or until budget/array-length bounds stop it).
+ * Run a full solo participant to completion (or until budget/array-length bounds stop it, or
+ * `isAborted()` starts returning true).
+ *
+ * `isAborted` (CADS-DEMO-sort: "Stop" doesn't stop -- a real, reproduced bug): the HTTP handlers
+ * below stream this run's rounds as NDJSON but never wired a client disconnect (browser "Stop",
+ * or just closing the tab) back to this loop, so it kept dispatching real rounds to the
+ * participant's own channel for its full budget (up to MAX_BUDGET=2000) with nobody left to read
+ * them. Several such orphaned runs against the SAME participant, still in flight while a NEW run
+ * against that participant starts, interleave their round dispatches over that participant's one
+ * physical channel -- every response looks locally sensible on its own, but the round sequence a
+ * caller actually sees jumps between two unrelated in-progress runs, which reads as "doesn't sort
+ * correctly" / "oscillates" and is very hard to tell apart from a genuine handler bug (that's
+ * exactly how this was first found -- a participant with a clean, independently-verified handler,
+ * confirmed deterministic and convergent via dryrun.py across many seeds, still looked broken
+ * live). Checked once per round, at the top of the loop, not mid-round: a round already dialed
+ * out is let finish rather than abandoned half-sent. Defaults to a no-op so every existing/direct
+ * caller (tests, runPartitionSession/runRaceSession before this parameter existed) is unaffected.
  * `callHandler` is the only side-effecting dependency, injected so tests never spawn a process.
  */
-async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUDGET, onRound = () => {} }) {
+async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUDGET, onRound = () => {}, isAborted = () => false }) {
   if (initialArray.length > MAX_ARRAY_LEN) {
     throw new Error(`array length ${initialArray.length} exceeds MAX_ARRAY_LEN (${MAX_ARRAY_LEN})`);
   }
@@ -196,6 +212,7 @@ async function runSoloRun({ callHandler, initialArray, you, budget = DEFAULT_BUD
   };
 
   while (round < budget) {
+    if (isAborted()) break;
     round++;
     const before = Date.now();
     const outcome = await runRound({
@@ -296,7 +313,7 @@ function splitEven(array, n) {
  * this deliberately does not implement (out of scope; the point here is watching N segments sort
  * concurrently, not delivering a working parallel sort algorithm).
  */
-async function runPartitionSession({ participants, initialArray, budget = DEFAULT_BUDGET, onRound = () => {} }) {
+async function runPartitionSession({ participants, initialArray, budget = DEFAULT_BUDGET, onRound = () => {}, isAborted = () => false }) {
   if (!Array.isArray(participants) || participants.length < 2) {
     throw new Error("runPartitionSession needs at least two participants");
   }
@@ -318,6 +335,7 @@ async function runPartitionSession({ participants, initialArray, budget = DEFAUL
         budget,
         callHandler: p.callHandler,
         onRound: (entry) => onRound({ you: p.you, segmentStart: seg.start, segmentLength: seg.array.length, ...entry }),
+        isAborted,
       }).catch((e) => ({
         you: p.you,
         error: e.message || String(e),
@@ -369,7 +387,7 @@ async function runPartitionSession({ participants, initialArray, budget = DEFAUL
  * runSoloRun already turns handler failures into per-round faults) is recorded with an `error`
  * field and ranked last rather than aborting the whole race.
  */
-async function runRaceSession({ participants, initialArray, budget = DEFAULT_BUDGET, onRound = () => {} }) {
+async function runRaceSession({ participants, initialArray, budget = DEFAULT_BUDGET, onRound = () => {}, isAborted = () => false }) {
   if (!Array.isArray(participants) || participants.length < 2) {
     throw new Error("runRaceSession needs at least two participants");
   }
@@ -385,6 +403,7 @@ async function runRaceSession({ participants, initialArray, budget = DEFAULT_BUD
         budget,
         callHandler: p.callHandler,
         onRound: (entry) => onRound({ you: p.you, ...entry }),
+        isAborted,
       }).catch((e) => ({ you: p.you, error: e.message || String(e), finishedCorrectly: false }))
     )
   );

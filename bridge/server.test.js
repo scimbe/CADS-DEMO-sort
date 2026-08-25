@@ -304,6 +304,93 @@ test("runSoloRun: history sent to the handler is capped, even after many moves",
   assert.ok(maxHistorySeen <= 20, `history must be capped at 20, saw ${maxHistorySeen}`);
 });
 
+// "Stop" didn't stop (real, reproduced bug): a client disconnect used to leave this loop
+// dispatching real rounds to the participant's own channel for the rest of its budget with
+// nobody left to read them. isAborted is the fix -- see its own comment above runSoloRun for why
+// this matters beyond "wasted rounds": an orphaned run left in flight against the SAME
+// participant as a NEW run interleaves both over that participant's one physical channel, which
+// reads as a broken/nondeterministic handler and is very hard to tell apart from an actual bug.
+test("runSoloRun: isAborted stops dispatching new rounds instead of running to budget", async () => {
+  let calls = 0;
+  const callHandler = async () => {
+    calls++;
+    return JSON.stringify({ action: "swap", i: 0, j: 1 }); // never claims done on its own
+  };
+  const result = await runSoloRun({
+    callHandler,
+    initialArray: [2, 1],
+    you: "would-run-forever",
+    budget: 1000,
+    isAborted: () => calls >= 5,
+  });
+  assert.equal(calls, 5, "callHandler must never be invoked again once isAborted() has tripped");
+  assert.equal(result.roundsUsed, 5, "the run must stop where it was aborted, not burn its full 1000-round budget");
+  assert.equal(result.finishedCorrectly, false);
+});
+
+test("runSoloRun: isAborted is optional — omitting it behaves exactly as before (runs to budget/done)", async () => {
+  const callHandler = async () => JSON.stringify({ action: "done" });
+  const result = await runSoloRun({ callHandler, initialArray: [1], you: "no-abort-listener", budget: 5 });
+  assert.equal(result.finishedCorrectly, true);
+});
+
+test("runSoloRun: an abort that lands after the very first round still stops before a second dispatch", async () => {
+  let calls = 0;
+  const callHandler = async () => {
+    calls++;
+    return JSON.stringify({ action: "swap", i: 0, j: 1 });
+  };
+  const result = await runSoloRun({
+    callHandler,
+    initialArray: [2, 1],
+    you: "aborted-immediately",
+    budget: 1000,
+    isAborted: () => calls >= 1,
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.roundsUsed, 1);
+});
+
+test("runRaceSession: isAborted is forwarded to every participant's underlying runSoloRun", async () => {
+  let aborted = false;
+  const makeHandler = () => async () => JSON.stringify({ action: "swap", i: 0, j: 1 });
+  const resultPromise = runRaceSession({
+    participants: [
+      { you: "a", callHandler: makeHandler() },
+      { you: "b", callHandler: makeHandler() },
+    ],
+    initialArray: [2, 1],
+    budget: 1000,
+    isAborted: () => aborted,
+  });
+  // Flip it almost immediately -- both participants must stop within a handful of rounds each,
+  // nowhere near the 1000-round budget, proving the flag reached both underlying runSoloRun calls.
+  aborted = true;
+  const result = await resultPromise;
+  for (const r of result.results) {
+    assert.ok(r.roundsUsed < 50, `"${r.you}" ran ${r.roundsUsed} rounds after abort — isAborted was not forwarded`);
+  }
+});
+
+test("runPartitionSession: isAborted is forwarded to every participant's underlying runSoloRun", async () => {
+  let aborted = false;
+  const makeHandler = () => async () => JSON.stringify({ action: "swap", i: 0, j: 1 });
+  const resultPromise = runPartitionSession({
+    participants: [
+      { you: "a", callHandler: makeHandler() },
+      { you: "b", callHandler: makeHandler() },
+    ],
+    initialArray: [4, 3, 2, 1],
+    budget: 1000,
+    isAborted: () => aborted,
+  });
+  aborted = true;
+  const result = await resultPromise;
+  for (const p of result.perParticipant) {
+    assert.ok(p.roundsUsed < 50, `"${p.you}" ran ${p.roundsUsed} rounds after abort — isAborted was not forwarded`);
+  }
+});
+
 // ---- race mode: same seed array, independent concurrent solo runs, ranked ----
 
 test("runRaceSession: requires at least two participants", async () => {

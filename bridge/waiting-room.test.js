@@ -297,6 +297,78 @@ test("handleJoinRequestSubmit: rejects a duplicate id already live or already pe
   );
 });
 
+// channelIdForLink is a function of holderPub alone, not of `you` -- a real (reproduced) bug: two
+// different participant ids submitted with the SAME holderPub silently share one Agent-Fabric
+// channel, so whichever ct-agent process actually holds it answers rounds for BOTH labels. The
+// attestation itself signs channel+holder+noise, never `you` (see memberNoiseAttestBytes in
+// join.js / the same preimage server-side), so vectors.positive.signature verifies unchanged
+// under a second `you` here -- exactly what a browser reusing its stored identity would submit.
+test("handleJoinRequestSubmit: rejects the same holderPub already live under a different id", async () => {
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
+      SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleJoinRequestSubmit } = require("./server.js");
+      const joinRequests = new Map();
+      const participants = new Map([
+        ["first-strategy", { you: "first-strategy", label: "First", cmd: "echo", holderPub: vectors.holder_a_pub }],
+      ]);
+      const res = fakeRes();
+      await handleJoinRequestSubmit(
+        fakeReq({
+          you: "second-strategy",
+          holderPub: vectors.holder_a_pub,
+          noisePub: vectors.noise_a_pub,
+          attestation: vectors.positive.signature,
+        }),
+        res,
+        joinRequests,
+        participants
+      );
+      assert.equal(res.statusCode, 409);
+      assert.match(JSON.parse(res.body).error, /first-strategy/);
+      assert.equal(joinRequests.size, 0, "never queued -- the collision is rejected before that");
+    }
+  );
+});
+
+test("handleJoinRequestSubmit: rejects the same holderPub already pending under a different id", async () => {
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
+      SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleJoinRequestSubmit } = require("./server.js");
+      const joinRequests = new Map([
+        ["already-pending", { you: "already-pending", label: "Already Pending", holderPub: vectors.holder_a_pub, noisePub: vectors.noise_a_pub, attestation: vectors.positive.signature, createdAt: Date.now() }],
+      ]);
+      const participants = new Map();
+      const res = fakeRes();
+      await handleJoinRequestSubmit(
+        fakeReq({
+          you: "another-id",
+          holderPub: vectors.holder_a_pub,
+          noisePub: vectors.noise_a_pub,
+          attestation: vectors.positive.signature,
+        }),
+        res,
+        joinRequests,
+        participants
+      );
+      assert.equal(res.statusCode, 409);
+      assert.match(JSON.parse(res.body).error, /already-pending/);
+      assert.equal(joinRequests.size, 1, "still just the original pending request -- the new one was rejected");
+    }
+  );
+});
+
 test("admin routes: fail closed (503) when SORT_ADMIN_EMAILS is unset", async () => {
   await withEnv({ SORT_ADMIN_EMAILS: "" }, () => {
     delete require.cache[require.resolve("./server.js")];
