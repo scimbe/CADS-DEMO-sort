@@ -806,6 +806,17 @@ async function handleRun(req, res, participants, participantId, query) {
   const len = Math.min(Math.max(Number(query.get("len")) || 8, 2), MAX_ARRAY_LEN);
   const initialArray = randomArray(len);
 
+  // "Stop" didn't stop (real, reproduced bug): a client disconnect (browser Stop button, closed
+  // tab, lost connection) used to leave runSoloRun dispatching real rounds to the participant's
+  // channel for the rest of its budget with nobody left to read them -- see isAborted's own
+  // comment in server.lib.js for how that surfaces (multiple orphaned runs against the SAME
+  // participant interleave over its one physical channel, which looks exactly like a broken
+  // handler). Armed before writeHead so a disconnect during the very first write is still caught.
+  let aborted = false;
+  req.on("close", () => {
+    aborted = true;
+  });
+
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   sendNdjson(res, { stage: "start", you: config.you, label: config.label, initialArray });
 
@@ -820,6 +831,7 @@ async function handleRun(req, res, participants, participantId, query) {
       budget: resolveBudget(query),
       callHandler: seenRecordingCall(config.you, config.cmd),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
+      isAborted: () => aborted,
     });
     sendNdjson(res, {
       stage: "final",
@@ -863,6 +875,13 @@ async function handleRace(req, res, participants, ids, query) {
   const len = Math.min(Math.max(Number(query.get("len")) || 8, 2), MAX_ARRAY_LEN);
   const initialArray = randomArray(len);
 
+  // See handleRun's own comment: a client disconnect must stop new rounds from being dispatched,
+  // or an orphaned race keeps hammering every one of its participants' channels in the background.
+  let aborted = false;
+  req.on("close", () => {
+    aborted = true;
+  });
+
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
   sendNdjson(res, { stage: "start", mode: "race", participants: chosen.map((c) => c.you), initialArray });
 
@@ -872,6 +891,7 @@ async function handleRace(req, res, participants, ids, query) {
       initialArray,
       budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
+      isAborted: () => aborted,
     });
     sendNdjson(res, { stage: "final", mode: "race", initialArray: result.initialArray, ranked: result.ranked, results: result.results });
   } catch (e) {
@@ -896,6 +916,13 @@ async function handlePartition(req, res, participants, ids, query) {
   const len = Math.min(Math.max(Number(query.get("len")) || 8, 2), MAX_ARRAY_LEN);
   const initialArray = randomArray(len);
 
+  // See handleRun's own comment: a client disconnect must stop new rounds from being dispatched,
+  // or an orphaned partition run keeps hammering every one of its participants' channels.
+  let aborted = false;
+  req.on("close", () => {
+    aborted = true;
+  });
+
   res.writeHead(200, { "content-type": "application/x-ndjson", "cache-control": "no-cache" });
 
   try {
@@ -918,6 +945,7 @@ async function handlePartition(req, res, participants, ids, query) {
       initialArray,
       budget: resolveBudget(query),
       onRound: (entry) => sendNdjson(res, { stage: "round", ...entry }),
+      isAborted: () => aborted,
     });
     sendNdjson(res, {
       stage: "final",
@@ -1536,6 +1564,36 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
   if (participants.has(you)) return jsonError(res, 409, `"${you}" is already a live participant`);
   if (joinRequests.has(you)) return jsonError(res, 409, `"${you}" already has a pending join request`);
   if (joinRequests.size >= JOIN_REQUEST_MAX_PENDING) return jsonError(res, 503, "too many pending requests -- try again later");
+
+  // A holderPub, not `you`, is what channelIdForLink is a function of -- two different
+  // participant ids submitted with the SAME holderPub don't get two channels, they get one
+  // channel wearing two labels. Whichever ct-agent process actually holds that channel then
+  // silently answers for both ids, so a round dispatched to the OTHER label gets a reply from
+  // the wrong handler (looks like "my strategy isn't running" or nonsensical moves, not an
+  // error). Reject the collision here, at submit time, rather than let it happen invisibly --
+  // this is the join.html "Generate a different identity" button existing for a reason, just
+  // not one the page told anyone about before now.
+  const collidingLive = [...participants].find(([otherYou, entry]) => otherYou !== you && entry.holderPub === holderPub);
+  if (collidingLive) {
+    return jsonError(
+      res,
+      409,
+      `this browser identity is already the live participant "${collidingLive[0]}" -- one holder key backs ` +
+        `exactly one participant id (they'd otherwise share the same underlying channel). Release it first ` +
+        `with POST /api/participants/${encodeURIComponent(collidingLive[0])}/leave, or click "Generate a ` +
+        `different identity" above before submitting a new id.`
+    );
+  }
+  const collidingPending = [...joinRequests].find(([otherYou, entry]) => otherYou !== you && entry.holderPub === holderPub);
+  if (collidingPending) {
+    return jsonError(
+      res,
+      409,
+      `this browser identity already has a pending join request as "${collidingPending[0]}" -- one holder key ` +
+        `backs exactly one participant id. Wait for that request to resolve, or click "Generate a different ` +
+        `identity" above before submitting a new id.`
+    );
+  }
 
   const operatorPubHex = process.env.SORT_CHANNEL_OPERATOR_PUBKEY;
   const bridgeHolderHex = process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY;
