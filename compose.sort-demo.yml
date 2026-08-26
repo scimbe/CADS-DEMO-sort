@@ -112,15 +112,16 @@ services:
       # Same value CADS-webconference-demo's own gated Caddyfile uses for CT_GATE_UPSTREAM_HOST.
       - CT_GATE_UPSTREAM_HOST=${CT_GATE_UPSTREAM_HOST:-bunsenbrenner.org}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ./index.html:/srv/index.html:ro
-      - ./admin.html:/srv/admin.html:ro
-      - ./admin.js:/srv/admin.js:ro
-      - ./join.html:/srv/join.html:ro
-      - ./join.js:/srv/join.js:ro
-      # ct-agent-wasm build output -- run ./build-wasm.sh once (or whenever it needs updating)
-      # before `up`; join.js's client-side identity generation loads this at runtime.
-      - ./pkg:/srv/pkg:ro
+      # CADS-DEMO-sort#39: mount each directory ONCE, not file-by-file. A single-file bind mount
+      # pins the inode, not the path -- git rewrites-and-renames on every checkout/pull/merge, so
+      # the container kept serving an unlinked, stale inode until something remembered to
+      # `--force-recreate`. Mounting the directory means path lookup happens per request; a
+      # rewritten file (or a fresh ./build-wasm.sh output) is picked up with no recreate at all.
+      - ./deploy/caddy:/etc/caddy:ro
+      # site/ is deliberately its own directory (not the repo root) so this container's webroot
+      # can never see bridge/, grant/, ops/, docs/, .git, or any other non-public repo content --
+      # ./build-wasm.sh writes its generated ct-agent-wasm output straight into site/pkg.
+      - ./site:/srv:ro
       - ${SORT_CERT_DIR:?set SORT_CERT_DIR=<dir with fullchain.pem+privkey.pem from the operator>}:/certs:ro
       - sort_demo_caddy_data:/data
     expose:

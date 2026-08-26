@@ -12,9 +12,10 @@ participants/*/generated/
 # ops/deployment-ledger.ndjson. Never source, never committed (it's live operator config).
 /participants.deploy.json
 
-# ct-agent-wasm build output (build-wasm.sh) -- generated, not source, same as
-# CADS-webconference-demo's own /pkg/ gitignore entry.
-/pkg/
+# ct-agent-wasm build output (build-wasm.sh) -- generated, not source. Lives under site/ (not
+# repo-root /pkg/ like CADS-webconference-demo) so it's covered by the single site/ directory
+# mount sort-demo-origin-local uses (CADS-DEMO-sort#39).
+/site/pkg/
 
 # sort-channel-grant's own Rust build output -- vendored source lives in grant/, the built
 # binary is produced fresh by bridge/Dockerfile's grant-builder stage, never committed.

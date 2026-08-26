@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Builds ct-agent-wasm (the browser Agent-Fabric channel primitives -- holder/noise identity
 # generation, channel_id_for_link, attestation signing) for the browser (wasm-bindgen --target
-# web) into ./pkg -- generated build output (gitignored), not source. ct-agent-wasm is "ct-agent
+# web) into ./site/pkg -- generated build output (gitignored), not source, living under site/
+# alongside the rest of what sort-demo-origin-local serves (CADS-DEMO-sort#39: that directory is
+# mounted as a whole, not file-by-file, specifically so a rebuild here is picked up without
+# recreating the container). ct-agent-wasm is "ct-agent
 # for the browser", living in scimbe/ct-agent's own wasm/ workspace member; join.js uses it to
 # generate a participant's channel identity and sign their join-request attestation entirely
 # client-side, no CLI install needed. Same approach CADS-webconference-demo already ships (its
@@ -14,7 +17,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # actually built and tested against this session (includes scimbe/ct-agent#9's `channel invite`
 # and #14's `--version`/unknown-subcommand fixes).
 CT_AGENT_REF="${CT_AGENT_REF:-1f629efe5145555ddfa6746194f81eb2dfbdb602}"
-OUT_DIR="$REPO_ROOT/pkg"
+OUT_DIR="$REPO_ROOT/site/pkg"
 
 docker run --rm -m 2g --cpus 2 \
   -v "$REPO_ROOT":/work -w /work \
@@ -41,8 +44,8 @@ cargo build -p ct-agent-wasm --release --target wasm32-unknown-unknown
 if ! command -v wasm-bindgen >/dev/null; then
   cargo install wasm-bindgen-cli --version 0.2.126 --root /usr/local/cargo/bin-wbg
 fi
-mkdir -p /work/pkg
-wasm-bindgen --target web --out-dir /work/pkg \
+mkdir -p /work/site/pkg
+wasm-bindgen --target web --out-dir /work/site/pkg \
   /cargo-target/wasm32-unknown-unknown/release/ct_agent_wasm.wasm
 '
 
