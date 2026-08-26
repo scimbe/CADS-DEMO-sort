@@ -506,7 +506,7 @@ test(
         },
         async () => {
           delete require.cache[require.resolve("./server.js")];
-          const { handleJoinRequestApprove } = require("./server.js");
+          const { handleJoinRequestApprove, freshenedCmd } = require("./server.js");
           const joinRequests = new Map([
             [
               "real-participant",
@@ -543,7 +543,17 @@ test(
           const cmd = liveParticipants.get("real-participant").cmd;
           assert.match(cmd, /CT_CHANNEL_ROLE=initiate/);
           assert.match(cmd, /CT_CHANNEL_CALL_SERVICE=text_generation/);
-          assert.match(cmd, new RegExp(`CT_CHANNEL_HOLDER_KEY=${bridge.holder.priv.toString("hex")}`));
+          // sort#40: the bridge's own long-term key material must NEVER be in the persisted/served
+          // cmd -- addApprovedParticipant writes this string to disk and GET /api/participants/
+          // approved serves it back verbatim to any admin session.
+          assert.doesNotMatch(cmd, /CT_CHANNEL_HOLDER_KEY=/);
+          assert.doesNotMatch(cmd, /CT_CHANNEL_NOISE_KEY=/);
+          // ...but a real dial still needs it -- freshenedCmd (the same call-time injection point
+          // that already re-applies a live front-door cert) must supply it fresh from readSecret(),
+          // never from the stored string.
+          const dialCmd = await freshenedCmd(cmd);
+          assert.match(dialCmd, new RegExp(`CT_CHANNEL_HOLDER_KEY=${bridge.holder.priv.toString("hex")}`));
+          assert.match(dialCmd, new RegExp(`CT_CHANNEL_NOISE_KEY=${bridge.noise.priv.toString("hex")}`));
           // Real production regression (CADS-DEMO-sort#9, windows-selection): without this flag
           // the bridge's own ct-agent invocation faults every round with "CT_CHANNEL_LISTEN
           // required" -- the bridge only ever dials OUT to a participant, so it has no dialable

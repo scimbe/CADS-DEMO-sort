@@ -1289,10 +1289,21 @@ async function relayGateAddr() {
  *  and prepend today's validated ones at CALL time -- old participants heal without
  *  re-approval, and a future CA rotation is picked up within the cert cache TTL. */
 async function freshenedCmd(storedCmd) {
+  // sort#40: strip any bridge holder/noise key that ended up baked into an already-persisted
+  // stored cmd (either from before this fix, or from the brief live-exposure window it closes --
+  // see the ops ledger) as well as the volatile front-door tokens below. Every `ct-agent channel`
+  // cmd on this bridge is always automateApproval's own initiate-role dial (the only place one is
+  // constructed, per its own comment), so it is always THIS bridge's identity, never a
+  // participant-specific one -- safe, and correct, to unconditionally re-inject it fresh here
+  // rather than trust whatever a stored string happens to carry.
   const stripped = storedCmd.replace(
-    /CT_CHANNEL_(?:FRONT_DOOR(?:_CERT|_ONLY)?|RELAY_GATE(?:_CERT)?)=\S+\s+/g,
+    /CT_CHANNEL_(?:FRONT_DOOR(?:_CERT|_ONLY)?|RELAY_GATE(?:_CERT)?|HOLDER_KEY|NOISE_KEY)=\S+\s+/g,
     ""
   );
+  const bridgeHolderKey = readSecret("SORT_CHANNEL_BRIDGE_HOLDER_KEY");
+  const bridgeNoiseKey = readSecret("SORT_CHANNEL_BRIDGE_NOISE_KEY");
+  const bridgeKeyEnv =
+    bridgeHolderKey && bridgeNoiseKey ? `CT_CHANNEL_HOLDER_KEY=${bridgeHolderKey} CT_CHANNEL_NOISE_KEY=${bridgeNoiseKey} ` : "";
   // Same "skip the round-trip when it can't matter" discipline as automateApproval: this runs on
   // EVERY invocation of a stored command (every round, for every approved participant), so an
   // unconditional fetch here is a real per-round control-plane call in any deployment that
@@ -1315,7 +1326,7 @@ async function freshenedCmd(storedCmd) {
   // halves of an arena pairing must dial :443 front-door-only -- which frontDoorEnv above
   // already enforces. The stripping regex still removes any RELAY_GATE tokens baked into
   // stored commands by the brief window where this file injected them.
-  return frontDoorEnv + stripped;
+  return bridgeKeyEnv + frontDoorEnv + stripped;
 }
 
 async function cpFetch(path, body) {
@@ -1475,10 +1486,17 @@ async function automateApproval(pending) {
   // UDP-capable peer in the edge's QUIC pairer while this side parks in the :443 pairer
   // (disjoint pairers, CADS-Tunnel#495). Until #495, both halves of a pairing must be
   // front-door-only, which frontDoorEnv enforces.
+  // sort#40: the bridge's own long-term CT_CHANNEL_HOLDER_KEY/CT_CHANNEL_NOISE_KEY must never be
+  // baked into this string -- it's persisted verbatim per participant (addApprovedParticipant)
+  // and served back verbatim to any admin session (GET /api/participants/approved), so every
+  // self-service join used to multiply at-rest plaintext copies of the bridge's real identity,
+  // not a per-participant secret. freshenedCmd (same place CT_CHANNEL_FRONT_DOOR_CERT is already
+  // re-injected fresh per call, for the same "never trust what was baked in at approval time"
+  // reason) now injects both keys from readSecret() at actual spawn time instead -- never
+  // written to disk, never serialized in an HTTP response.
   const cmd =
     `CT_CHANNEL_ROLE=initiate CT_CHANNEL_RELAY_ONLY=1 CT_CHANNEL_CALL_SERVICE=text_generation ` +
     `CT_CHANNEL_GRANT=${minted.grantA} ` +
-    `CT_CHANNEL_HOLDER_KEY=${bridgeHolderPriv.toString("hex")} CT_CHANNEL_NOISE_KEY=${bridgeNoisePriv.toString("hex")} ` +
     `CT_CHANNEL_BROKER=${process.env.SORT_CHANNEL_BROKER} CT_CHANNEL_RELAY=${process.env.SORT_CHANNEL_RELAY} ` +
     frontDoorEnv +
     `ct-agent channel`;
@@ -2063,6 +2081,7 @@ module.exports = {
   mintGrants,
   cpFetch,
   automateApproval,
+  freshenedCmd,
   currentOidcToken,
   ensureServiceOidcToken,
   automationConfigured,
