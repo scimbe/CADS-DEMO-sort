@@ -7,6 +7,11 @@ participants/*/generated/
 /participants-approved.json
 /pending-grants.json
 
+# The operator's own curated base SORT_PARTICIPANTS_FILE, kept here (persistent, gitignored)
+# instead of scratchpad or /tmp after the 2026-08-26 reboot key/config-loss incident -- see
+# ops/deployment-ledger.ndjson. Never source, never committed (it's live operator config).
+/participants.deploy.json
+
 # ct-agent-wasm build output (build-wasm.sh) -- generated, not source, same as
 # CADS-webconference-demo's own /pkg/ gitignore entry.
 /pkg/
