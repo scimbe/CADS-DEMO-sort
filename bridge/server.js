@@ -560,6 +560,7 @@ class PersistentRoleClient {
     this.buf = "";
     this.stderrTail = "";
     this.pendingResolve = null; // FIFO depth 1 -- calls are serialized via `chain`
+    this.pendingResolveChild = null; // which child pendingResolve is actually waiting on -- guards against a stale/killed child's async close settling a NEWER call (see _callOnce)
     this.chain = Promise.resolve();
     // #25 proactive respawn (pre-warm): when the held session dies BETWEEN rounds (participant
     // restart, edge blip), waiting for the next round call to notice costs that call a full
@@ -629,6 +630,19 @@ class PersistentRoleClient {
         if (settled) return;
         settled = true;
         this._log(`call timed out after ${Math.round(timeoutMs / 1000)}s -- killing child pid ${child && child.pid}`);
+        // Stale-callback race (found live 2026-08-26 while investigating a reload/new-run report):
+        // _kill() here fires this child's own "close" asynchronously, sometimes AFTER call()'s
+        // catch-and-retry above has already spawned a fresh child and overwritten
+        // this.pendingResolve with the RETRY's callback. Without the child-identity guard below,
+        // that stale close event would incorrectly reject the retry's promise using the OLD
+        // child's death, even though the new child might have been about to succeed -- observed
+        // live as a run cycling through repeated 30s timeouts against a participant whose fresh
+        // dial should have worked. Clearing both here (not just leaving settled=true) means a
+        // close event arriving after this point is unambiguously stale for THIS call.
+        if (this.pendingResolveChild === child) {
+          this.pendingResolve = null;
+          this.pendingResolveChild = null;
+        }
         this._kill(); // a stuck call kills the whole child; the NEXT call respawns
         reject(new Error(`role command timed out after ${Math.round(timeoutMs / 1000)}s`));
       }, timeoutMs);
@@ -637,6 +651,7 @@ class PersistentRoleClient {
         settled = true;
         clearTimeout(timer);
         this.pendingResolve = null;
+        this.pendingResolveChild = null;
         if (err) return reject(err);
         if (envelope.ok) {
           this.respawnDelayMs = 500; // a healthy session resets the pre-warm backoff
@@ -644,8 +659,9 @@ class PersistentRoleClient {
         }
         reject(new Error(`role command reported: ${envelope.error || "unknown error"}`));
       };
+      this.pendingResolveChild = child;
       child.stdin.write(JSON.stringify(input) + "\n", (e) => {
-        if (e && this.pendingResolve) this.pendingResolve(new Error(`stdin write failed: ${e.message}`));
+        if (e && this.pendingResolveChild === child && this.pendingResolve) this.pendingResolve(new Error(`stdin write failed: ${e.message}`));
       });
     });
   }
@@ -671,7 +687,7 @@ class PersistentRoleClient {
       while ((nl = this.buf.indexOf("\n")) >= 0) {
         const line = this.buf.slice(0, nl).trim();
         this.buf = this.buf.slice(nl + 1);
-        if (!line || !this.pendingResolve) continue;
+        if (!line || this.pendingResolveChild !== child || !this.pendingResolve) continue;
         try {
           this.pendingResolve(null, JSON.parse(line));
         } catch (e) {
@@ -689,9 +705,19 @@ class PersistentRoleClient {
       // said WHAT (closed, code, how long alive) but never WHY. Log it here too so the next
       // death is diagnosable instead of guessed at.
       const tail = this.stderrTail.trim() ? ` -- stderr: ${this.stderrTail.trim().split("\n").pop()}` : "";
-      this._log(`child pid ${child.pid} closed (code ${code}) after ${Math.round(lifeMs / 1000)}s${this.pendingResolve ? " during an active call" : " while idle"}${tail}`);
-      if (this.pendingResolve) {
-        this.pendingResolve(
+      // Stale-callback guard (found live 2026-08-26): this "close" is asynchronous relative to
+      // whatever killed this specific child (a timeout, an explicit _kill()) -- by the time it
+      // fires, call()'s own catch-and-retry may have ALREADY spawned a fresh child and moved
+      // this.pendingResolve on to that new attempt. Only settle the pending call if THIS child is
+      // actually the one it's waiting on (this.pendingResolveChild === child); otherwise this
+      // close is stale and must not reject an unrelated, possibly-succeeding call.
+      const forPendingCall = this.pendingResolveChild === child && this.pendingResolve;
+      this._log(`child pid ${child.pid} closed (code ${code}) after ${Math.round(lifeMs / 1000)}s${forPendingCall ? " during an active call" : " while idle"}${tail}`);
+      if (forPendingCall) {
+        const resolveFn = this.pendingResolve;
+        this.pendingResolve = null;
+        this.pendingResolveChild = null;
+        resolveFn(
           new Error(`role command exited ${code}${this.stderrTail.trim() ? `: ${this.stderrTail.trim().split("\n").pop()}` : ""}`)
         );
       } else if (wasCurrent) {
@@ -703,8 +729,15 @@ class PersistentRoleClient {
     });
     child.on("error", (e) => {
       if (this.child === child) this.child = null;
-      this._log(`spawn error: ${e.message}`);
-      if (this.pendingResolve) this.pendingResolve(new Error(`spawn failed: ${e.message}`));
+      if (this.pendingResolveChild === child && this.pendingResolve) {
+        const resolveFn = this.pendingResolve;
+        this.pendingResolve = null;
+        this.pendingResolveChild = null;
+        this._log(`spawn error: ${e.message}`);
+        resolveFn(new Error(`spawn failed: ${e.message}`));
+      } else {
+        this._log(`spawn error: ${e.message}`);
+      }
     });
   }
 

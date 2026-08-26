@@ -1203,6 +1203,33 @@ test("PersistentRoleClient: an IDLE session death triggers a proactive pre-warm 
   client._kill();
 });
 
+test("PersistentRoleClient: a stale killed child's late 'close' event must not settle a NEWER call (found live 2026-08-26)", async () => {
+  // Live incident: call() times out on a hung child, kills it, and retries on a fresh child --
+  // but _kill()'s SIGKILL is asynchronous, so the OLD child's own 'close' event can arrive AFTER
+  // the retry has already spawned a new child and moved this.pendingResolve on to it. Without
+  // per-call child tracking, that stale close incorrectly rejected the RETRY's promise using the
+  // dead child's exit reason, even when the fresh child was about to answer correctly --
+  // reproduced live as a participant's run cycling through repeated 30s timeouts against a
+  // channel that a moment later proved perfectly dialable. This drives the same real shape (a
+  // hung first attempt timing out, a fast-answering retry) end to end through the public call()
+  // API and asserts the retry's own real answer wins, not a stale error about the first child.
+  const { PersistentRoleClient } = require("./server.js");
+  const hangsForever = `node -e 'setInterval(()=>{}, 1000)'`; // never reads stdin, never replies
+  const answersInstantly =
+    `node -e '` +
+    `const rl=require("readline").createInterface({input:process.stdin});` +
+    `rl.on("line",()=>console.log(JSON.stringify({ok:true,output:"fresh-child-answer"})));` +
+    `'`;
+  let calls = 0;
+  const client = new PersistentRoleClient(async () => {
+    calls += 1;
+    return calls === 1 ? hangsForever : answersInstantly;
+  });
+  const out = await client.call({ round: 1 }, 150); // short timeout: attempt 1 hangs, kills, retries
+  assert.equal(out, "fresh-child-answer", "the retry's real answer must win over the first child's stale, later-arriving close event");
+  client._kill();
+});
+
 test("callHandlerProcess: caps concurrent spawns and queues the rest, without dropping or deadlocking any of them (sort#44)", async () => {
   await withEnv({ SORT_MAX_CONCURRENT_SPAWNS: "3", SORT_MAX_QUEUED_SPAWNS: "50" }, async () => {
     delete require.cache[require.resolve("./server.js")];
