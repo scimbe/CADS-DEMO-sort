@@ -591,23 +591,53 @@ test(
 
 // --- Join-request status polling (join.js's post-approval GET) --------------------------------
 
-test("handleJoinRequestStatus: delivers the pending grant once and clears it on success", () => {
-  delete require.cache[require.resolve("./server.js")];
-  const { handleJoinRequestStatus } = require("./server.js");
-  const joinRequests = new Map();
-  const pendingGrantDelivery = new Map([["p1", { channel: "chan-hex", grantB: "grant-hex", createdAt: Date.now() }]]);
+test(
+  "handleJoinRequestStatus: delivers the pending grant, and a second read within the grace window " +
+    "gets the SAME grant rather than consuming it (CADS-DEMO-sort#57: the first reader of this " +
+    "public, unauthenticated route need not be the participant -- a monitoring script or stray " +
+    "curl consuming the only copy is an accident waiting to happen, not an attack)",
+  () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { handleJoinRequestStatus } = require("./server.js");
+    const joinRequests = new Map();
+    const pendingGrantDelivery = new Map([["p1", { channel: "chan-hex", grantB: "grant-hex", createdAt: Date.now() }]]);
 
-  const res = fakeRes();
-  handleJoinRequestStatus({}, res, joinRequests, pendingGrantDelivery, "p1");
+    const res = fakeRes();
+    handleJoinRequestStatus({}, res, joinRequests, pendingGrantDelivery, "p1");
+    assert.equal(res.statusCode, 200);
+    assert.deepEqual(JSON.parse(res.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
+    assert.ok(pendingGrantDelivery.has("p1"), "still present -- delivery does not consume on first read");
+    assert.ok(pendingGrantDelivery.get("p1").firstDeliveredAt, "first successful read is timestamped");
 
-  assert.equal(res.statusCode, 200);
-  assert.deepEqual(JSON.parse(res.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
-  assert.equal(pendingGrantDelivery.has("p1"), false, "delivered successfully, so single-delivery clears it");
+    // A second reader (the legitimate participant, or an accidental duplicate -- indistinguishable
+    // to the server) within the grace window gets the SAME grant, not "unknown".
+    const res2 = fakeRes();
+    handleJoinRequestStatus({}, res2, joinRequests, pendingGrantDelivery, "p1");
+    assert.deepEqual(
+      JSON.parse(res2.body),
+      { status: "approved", channel: "chan-hex", grant: "grant-hex" },
+      "a second read inside the grace window is idempotent, not a consuming race"
+    );
+  }
+);
 
-  const res2 = fakeRes();
-  handleJoinRequestStatus({}, res2, joinRequests, pendingGrantDelivery, "p1");
-  assert.deepEqual(JSON.parse(res2.body), { status: "unknown" }, "second poll finds nothing left to deliver");
-});
+test(
+  "handleJoinRequestStatus: the grant expires (lazily) once the grace window has passed since first delivery",
+  () => {
+    delete require.cache[require.resolve("./server.js")];
+    const { handleJoinRequestStatus } = require("./server.js");
+    const joinRequests = new Map();
+    const longAgo = Date.now() - 60_000; // well past GRANT_DELIVERY_GRACE_MS (30s)
+    const pendingGrantDelivery = new Map([
+      ["p1", { channel: "chan-hex", grantB: "grant-hex", createdAt: longAgo, firstDeliveredAt: longAgo }],
+    ]);
+
+    const res = fakeRes();
+    handleJoinRequestStatus({}, res, joinRequests, pendingGrantDelivery, "p1");
+    assert.deepEqual(JSON.parse(res.body), { status: "unknown" }, "expired after the grace window, not delivered again");
+    assert.equal(pendingGrantDelivery.has("p1"), false, "expiry actually clears the entry (lazy, on this read)");
+  }
+);
 
 test(
   "handleJoinRequestStatus: a connection reset mid-response must NOT destroy the only copy of the grant " +
@@ -633,7 +663,10 @@ test(
     const res2 = fakeRes();
     handleJoinRequestStatus({}, res2, joinRequests, pendingGrantDelivery, "p1");
     assert.deepEqual(JSON.parse(res2.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
-    assert.equal(pendingGrantDelivery.has("p1"), false, "the retry's own successful delivery clears it");
+    assert.ok(
+      pendingGrantDelivery.has("p1"),
+      "the retry's own successful delivery stays available for the grace window (#57), not consumed"
+    );
   }
 );
 
@@ -658,7 +691,7 @@ test(
       const afterRestart = loadPendingGrants();
       assert.deepEqual(
         afterRestart.get("p1"),
-        { channel: "chan-hex", grantB: "grant-hex", createdAt: 111 },
+        { channel: "chan-hex", grantB: "grant-hex", createdAt: 111, firstDeliveredAt: undefined },
         "the grant survives the restart intact"
       );
 
@@ -666,12 +699,12 @@ test(
       const res = fakeRes();
       handleJoinRequestStatus({}, res, new Map(), afterRestart, "p1");
       assert.deepEqual(JSON.parse(res.body), { status: "approved", channel: "chan-hex", grant: "grant-hex" });
-      assert.equal(afterRestart.has("p1"), false, "single-delivery still clears it in memory");
+      assert.ok(afterRestart.has("p1"), "still present in memory -- within the grace window (#57)");
 
-      // ...and that clear is itself persisted, so a SECOND redeploy can't resurrect an already-
-      // delivered grant and hand it out again.
+      // ...and the firstDeliveredAt stamp is itself persisted, so a SECOND redeploy within the
+      // grace window still honors the same delivery window rather than resetting it.
       const afterSecondRestart = loadPendingGrants();
-      assert.equal(afterSecondRestart.has("p1"), false, "delete-on-finish was persisted too");
+      assert.ok(afterSecondRestart.get("p1").firstDeliveredAt, "firstDeliveredAt survives a restart too");
     });
   }
 );
@@ -1295,6 +1328,49 @@ test("callHandlerProcess: a timeout kills the whole process group, not just the 
   fs.rmSync(dir, { recursive: true, force: true });
   assert.ok(reaped, `grandchild ${grandchildPid} survived the timeout -- the process group was not killed`);
 });
+
+test(
+  "seenRecordingCall: a successful call marks the participant everAnswered, a failed one does not " +
+    "(CADS-DEMO-sort#58: GET /participants must be able to tell 'ever completed a real call' apart " +
+    "from 'was approved and never answered anything' -- lastSeenAt alone can't, since approval " +
+    "stamps it too)",
+  async () => {
+    delete require.cache[require.resolve("./server.js")];
+    const {
+      seenRecordingCall,
+      hasParticipantEverAnswered,
+      resetParticipantEverAnsweredForTests,
+    } = require("./server.js");
+    resetParticipantEverAnsweredForTests();
+
+    assert.equal(hasParticipantEverAnswered("p1"), false, "starts false -- never seen a call yet");
+
+    // A trivial local (non-channel) command, same "echo JSON" convention as the concurrency test
+    // above -- roleCall routes it straight to callHandlerProcess since it doesn't match ct-agent channel.
+    const okCall = seenRecordingCall("p1", `echo '{"ok":true}'`);
+    await okCall({ probe: true });
+    assert.ok(hasParticipantEverAnswered("p1"), "a resolved roleCall marks the participant everAnswered");
+
+    // A different, never-called participant must stay false -- this isn't a global flag.
+    assert.equal(hasParticipantEverAnswered("p2"), false, "unrelated participant unaffected");
+
+    // A rejected dial (timeout) must NOT mark everAnswered -- mirrors #28's own rule for lastSeenAt
+    // ("a rejected dial deliberately does NOT touch the timestamp"), same reasoning applies here.
+    // TIMEOUT_MS is resolved from SORT_ROUND_TIMEOUT_MS at module load, so it needs a fresh require.
+    await withEnv({ SORT_ROUND_TIMEOUT_MS: "500" }, async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const {
+        seenRecordingCall: seenRecordingCallShortTimeout,
+        hasParticipantEverAnswered: hasEverAnsweredShortTimeout,
+        resetParticipantEverAnsweredForTests: resetShortTimeout,
+      } = require("./server.js");
+      resetShortTimeout();
+      const timeoutCall = seenRecordingCallShortTimeout("p3", "sleep 30");
+      await assert.rejects(() => timeoutCall({ probe: true }), /timed out/, "sanity: the call actually failed");
+      assert.equal(hasEverAnsweredShortTimeout("p3"), false, "a rejected dial must not mark everAnswered");
+    });
+  }
+);
 
 test("channelCollisionDetail: explains a holder-pair collision instead of implying a missing permission", () => {
   // 2026-08-17: a tester hit `403 channel owned by another subject`, tried again under a

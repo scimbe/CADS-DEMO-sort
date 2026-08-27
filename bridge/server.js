@@ -147,6 +147,22 @@ function resetParticipantSeenForTests() {
   participantLastSeen.clear();
 }
 
+// CADS-DEMO-sort#58: GET /participants advertises `you`/`label` only, with no way for a reader to
+// tell "has ever completed a real call" apart from "was just approved and never answered anything"
+// -- lastSeenAt alone can't distinguish these, since addApprovedParticipant stamps it at approval
+// time too. This tracks the narrower fact deliberately: only a real resolved roleCall (inside
+// seenRecordingCall's success path, i.e. the participant's ct-agent actually answered) adds to it,
+// approval never does. Same in-memory-only shape as participantLastSeen; not persisted, since
+// "did we ever see this participant answer in the current bridge's lifetime" is the honest claim,
+// not a durable historical record.
+const participantEverAnswered = new Set();
+function resetParticipantEverAnsweredForTests() {
+  participantEverAnswered.clear();
+}
+function hasParticipantEverAnswered(you) {
+  return participantEverAnswered.has(you);
+}
+
 /** Append (or replace, by id) one entry into SORT_PARTICIPANTS_APPROVED_FILE and make it live on
  *  the already-running bridge immediately -- `participants` is a Map held by reference in every
  *  request handler (see main()), so `.set()` here is visible on the very next request, no restart
@@ -412,7 +428,12 @@ function loadPendingGrants() {
     try {
       for (const entry of JSON.parse(fs.readFileSync(path, "utf8"))) {
         if (entry && typeof entry.you === "string") {
-          map.set(entry.you, { channel: entry.channel, grantB: entry.grantB, createdAt: entry.createdAt });
+          map.set(entry.you, {
+            channel: entry.channel,
+            grantB: entry.grantB,
+            createdAt: entry.createdAt,
+            firstDeliveredAt: entry.firstDeliveredAt,
+          });
         }
       }
     } catch (e) {
@@ -829,6 +850,7 @@ function seenRecordingCall(you, cmd) {
   return (input) =>
     roleCall(cmd, input).then((r) => {
       recordParticipantSeen(you);
+      participantEverAnswered.add(you);
       return r;
     });
 }
@@ -1774,24 +1796,41 @@ async function handleJoinRequestApprove(req, res, joinRequests, participants, pe
  *  Safe to leave unauthenticated: a grant is only USABLE by whoever holds the matching holder
  *  private key, which never left the requester's own browser -- reading the grant string itself
  *  reveals nothing exploitable to a third party who doesn't also hold that key. */
+// CADS-DEMO-sort#57: this route is deliberately unauthenticated (grant strings are only usable
+// by whoever holds the matching holder private key), but the previous single-shot delete-on-finish
+// meant the FIRST reader consumed the grant, not necessarily the participant -- a monitoring
+// script, a second tab, or a stray curl could silently eat a legitimate participant's only copy.
+// Fix: delivery is idempotent for a short grace window after the first successful read, so a
+// duplicate reader within the window gets the same grant harmlessly; the entry only expires
+// (lazily, on the next status check) once the window has passed.
+const GRANT_DELIVERY_GRACE_MS = 30_000;
+
 function handleJoinRequestStatus(req, res, joinRequests, pendingGrantDelivery, you) {
   if (pendingGrantDelivery.has(you)) {
     const entry = pendingGrantDelivery.get(you);
-    res.writeHead(200, { "content-type": "application/json" });
-    // Delete only once the response has actually finished writing -- a connection reset
-    // mid-response (real, reproduced: CADS-DEMO-sort#9, intermittent `RemoteDisconnected`
-    // against this same bridge from one real participant's network) must not be treated as
-    // delivered. Deleting eagerly (the previous behavior) meant that exact failure silently
-    // destroyed the participant's only copy of grantB with no retry path -- "single delivery"
-    // was meant to stop a stale grant lingering forever, not to punish a dropped connection.
-    // A retry that lands after a genuine successful delivery finds the entry gone and reports
-    // "unknown", same as today; a retry after a failed delivery now finds it still there.
-    res.on("finish", () => {
+    const now = Date.now();
+    if (entry.firstDeliveredAt && now - entry.firstDeliveredAt > GRANT_DELIVERY_GRACE_MS) {
+      // Grace window elapsed since the first successful delivery -- expire lazily here rather
+      // than on a timer, same style as the rest of this file's in-memory maps.
       pendingGrantDelivery.delete(you);
       persistPendingGrants(pendingGrantDelivery);
-    });
-    res.end(JSON.stringify({ status: "approved", channel: entry.channel, grant: entry.grantB }));
-    return;
+    } else {
+      res.writeHead(200, { "content-type": "application/json" });
+      // Delete only once the response has actually finished writing -- a connection reset
+      // mid-response (real, reproduced: CADS-DEMO-sort#9, intermittent `RemoteDisconnected`
+      // against this same bridge from one real participant's network) must not be treated as
+      // delivered. Deleting eagerly (the previous behavior) meant that exact failure silently
+      // destroyed the participant's only copy of grantB with no retry path -- "single delivery"
+      // was meant to stop a stale grant lingering forever, not to punish a dropped connection.
+      res.on("finish", () => {
+        if (!entry.firstDeliveredAt) {
+          entry.firstDeliveredAt = Date.now();
+          persistPendingGrants(pendingGrantDelivery);
+        }
+      });
+      res.end(JSON.stringify({ status: "approved", channel: entry.channel, grant: entry.grantB }));
+      return;
+    }
   }
   const status = joinRequests.has(you) ? "pending" : "unknown";
   res.writeHead(200, { "content-type": "application/json" });
@@ -1941,7 +1980,20 @@ function main() {
     const url = new URL(req.url, "http://localhost");
     if (req.method === "GET" && url.pathname === "/participants") {
       res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify([...participants.values()].map((p) => ({ you: p.you, label: p.label }))));
+      // everAnswered (CADS-DEMO-sort#58): lets a reader tell "has completed at least one real call
+      // this bridge lifetime" apart from "was approved and never answered anything" -- the two look
+      // identical without this, since approval also stamps lastSeenAt. Not present at all for
+      // base-file (operator-curated) participants like reference-sorter until their first real call
+      // either -- same rule, no special-casing.
+      res.end(
+        JSON.stringify(
+          [...participants.values()].map((p) => ({
+            you: p.you,
+            label: p.label,
+            everAnswered: participantEverAnswered.has(p.you),
+          }))
+        )
+      );
       return;
     }
     if (req.method === "GET" && url.pathname === "/healthz") {
@@ -2085,6 +2137,9 @@ module.exports = {
   reconcileApprovedParticipants,
   recordParticipantSeen,
   resetParticipantSeenForTests,
+  seenRecordingCall,
+  hasParticipantEverAnswered,
+  resetParticipantEverAnsweredForTests,
   PARTICIPANT_TTL_MS,
   callHandlerProcess,
   PersistentRoleClient,
