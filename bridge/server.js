@@ -146,6 +146,19 @@ function recordParticipantSeen(you, now = Date.now()) {
 function resetParticipantSeenForTests() {
   participantLastSeen.clear();
 }
+// Exposed alongside everAnswered on GET /participants (CADS-DEMO-sort#58 follow-up, live-verified
+// by an external re-test 2026-08-28): everAnswered never decays -- once true, a participant that
+// answered a single call at any point in this bridge's uptime stays "everAnswered: true" forever,
+// even if every round since has hung. Two real participants (tobi, bennet) reproduced exactly this:
+// both answered successfully at some point, both now time out every round (0 completions in 40s),
+// and both still read everAnswered:true -- actively steering a reader who filters on that flag
+// TOWARD the two that currently hang, away from ones that would actually finish a run. lastSeenAt
+// is the fix: it's the timestamp of the LAST successful call (same seenRecordingCall trigger, see
+// below), not "ever, at all" -- pairing "everAnswered:true" with a stale lastSeenAt is exactly the
+// "used to work, now dead" signal #58 originally asked for and everAnswered alone can't give.
+function getParticipantLastSeen(you) {
+  return participantLastSeen.get(you) ?? null;
+}
 
 // CADS-DEMO-sort#58: GET /participants advertises `you`/`label` only, with no way for a reader to
 // tell "has ever completed a real call" apart from "was just approved and never answered anything"
@@ -154,7 +167,8 @@ function resetParticipantSeenForTests() {
 // seenRecordingCall's success path, i.e. the participant's ct-agent actually answered) adds to it,
 // approval never does. Same in-memory-only shape as participantLastSeen; not persisted, since
 // "did we ever see this participant answer in the current bridge's lifetime" is the honest claim,
-// not a durable historical record.
+// not a durable historical record. Read this together with lastSeenAt above, not alone -- see its
+// comment for why "everAnswered:true" by itself can point straight at a currently-broken participant.
 const participantEverAnswered = new Set();
 function resetParticipantEverAnsweredForTests() {
   participantEverAnswered.clear();
@@ -1990,12 +2004,17 @@ function main() {
       // identical without this, since approval also stamps lastSeenAt. Not present at all for
       // base-file (operator-curated) participants like reference-sorter until their first real call
       // either -- same rule, no special-casing.
+      // lastSeenAt (CADS-DEMO-sort#58 follow-up): everAnswered never decays, so pair it with the
+      // timestamp of the LAST successful call -- "everAnswered:true" plus a stale lastSeenAt is a
+      // participant that used to work and now doesn't, not a currently-healthy one. See
+      // getParticipantLastSeen's comment for the live-reproduced case this closes.
       res.end(
         JSON.stringify(
           [...participants.values()].map((p) => ({
             you: p.you,
             label: p.label,
             everAnswered: participantEverAnswered.has(p.you),
+            lastSeenAt: getParticipantLastSeen(p.you),
           }))
         )
       );
@@ -2142,6 +2161,7 @@ module.exports = {
   reconcileApprovedParticipants,
   recordParticipantSeen,
   resetParticipantSeenForTests,
+  getParticipantLastSeen,
   seenRecordingCall,
   hasParticipantEverAnswered,
   resetParticipantEverAnsweredForTests,

@@ -1393,6 +1393,70 @@ test(
   }
 );
 
+test(
+  "getParticipantLastSeen: stays frozen across a run of failed calls, so it distinguishes " +
+    "'answered once, now hangs every round' from 'currently healthy' -- everAnswered alone can't " +
+    "(CADS-DEMO-sort#58 follow-up: live-reproduced 2026-08-28, two real participants that had once " +
+    "answered kept everAnswered:true while timing out every subsequent round)",
+  async () => {
+    delete require.cache[require.resolve("./server.js")];
+    const {
+      getParticipantLastSeen,
+      recordParticipantSeen,
+      resetParticipantSeenForTests,
+      seenRecordingCall,
+      hasParticipantEverAnswered,
+      resetParticipantEverAnsweredForTests,
+    } = require("./server.js");
+    resetParticipantSeenForTests();
+    resetParticipantEverAnsweredForTests();
+
+    assert.equal(getParticipantLastSeen("tobi"), null, "starts null -- never seen a call yet");
+
+    // Mirrors the live case exactly: one successful call (stamps both everAnswered and lastSeenAt)...
+    const okCall = seenRecordingCall("tobi", `echo '{"ok":true}'`);
+    await okCall({ probe: true });
+    assert.ok(hasParticipantEverAnswered("tobi"), "sanity: the one success marks everAnswered");
+    const firstSeenAt = getParticipantLastSeen("tobi");
+    assert.equal(typeof firstSeenAt, "number", "lastSeenAt is stamped by the successful call");
+
+    // ...then every round since hangs (rejects on timeout). everAnswered stays true (it never
+    // decays -- that's finding #58's original gap), but lastSeenAt must NOT advance, because a
+    // rejected dial deliberately doesn't touch it (#28's rule, reused here on purpose).
+    await withEnv({ SORT_ROUND_TIMEOUT_MS: "500" }, async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const {
+        getParticipantLastSeen: getLastSeenShortTimeout,
+        recordParticipantSeen: recordSeenShortTimeout,
+        seenRecordingCall: seenRecordingCallShortTimeout,
+      } = require("./server.js");
+      // Fresh require means a fresh in-memory Map/Set -- seed it back to the same "answered once,
+      // now hanging" state under this short-timeout module instance specifically (recordSeenShortTimeout,
+      // not the outer recordParticipantSeen, which is bound to the earlier module instance).
+      recordSeenShortTimeout("tobi", firstSeenAt);
+      const hangingCall = seenRecordingCallShortTimeout("tobi", "sleep 30");
+      await assert.rejects(() => hangingCall({ probe: true }), /timed out/, "sanity: this round hangs");
+      assert.equal(
+        getLastSeenShortTimeout("tobi"),
+        firstSeenAt,
+        "a hung round must not refresh lastSeenAt -- it must stay pinned to the one real success"
+      );
+    });
+
+    // A currently-healthy participant, by contrast, keeps refreshing -- this is the pairing that
+    // lets a reader tell the two apart: same everAnswered:true, different (fresh vs. stale) lastSeenAt.
+    const healthyCall = seenRecordingCall("bennet", `echo '{"ok":true}'`);
+    await healthyCall({ probe: true });
+    const healthySeenAt = getParticipantLastSeen("bennet");
+    await new Promise((r) => setTimeout(r, 5));
+    await healthyCall({ probe: true });
+    assert.ok(
+      getParticipantLastSeen("bennet") >= healthySeenAt,
+      "a repeatedly-succeeding participant keeps its lastSeenAt current"
+    );
+  }
+);
+
 test("channelCollisionDetail: explains a holder-pair collision instead of implying a missing permission", () => {
   // 2026-08-17: a tester hit `403 channel owned by another subject`, tried again under a
   // second display name, got the identical error, and reasonably concluded their account
