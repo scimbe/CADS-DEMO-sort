@@ -78,6 +78,16 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM node:20-slim
 WORKDIR /app
+# CADS-DEMO-sort#52's push-lag incident: an outside reader had no way to tell the deployed code
+# apart from origin/main's HEAD short of discovering an 11-commit gap by accident. Baking the
+# commit this image was actually built from in (via --build-arg, e.g.
+# `--build-arg SORT_DEPLOY_SHA=$(git rev-parse --short HEAD)`) and exposing it read-only via
+# GET /api/channel-info lets anyone compare what they're reading against what's actually running,
+# rather than assuming HEAD is the upper bound. Empty is a valid, honest value (a build run
+# without the arg), not an error -- callers must treat missing the same as "unknown", not "same
+# as HEAD".
+ARG SORT_DEPLOY_SHA=
+ENV SORT_DEPLOY_SHA=${SORT_DEPLOY_SHA}
 COPY bridge/server.js bridge/server.lib.js bridge/attestation.js ./
 COPY --from=grant-builder /tmp/sort-channel-grant /usr/local/bin/sort-channel-grant
 COPY --from=ct-agent-builder /tmp/ct-agent /usr/local/bin/ct-agent

@@ -1585,6 +1585,11 @@ async function handleChannelInfo(req, res) {
   res.writeHead(200, { "content-type": "application/json" });
   res.end(
     JSON.stringify({
+      // CADS-DEMO-sort#52: lets an outside reader tell what's actually running apart from
+      // whatever they last read from source control -- see the Dockerfile's own comment on
+      // SORT_DEPLOY_SHA. null (not "" or a stale value) when the image was built without the
+      // build-arg, so a caller can tell "unknown" apart from "matches something specific".
+      deploySha: process.env.SORT_DEPLOY_SHA || null,
       operatorPubkey: process.env.SORT_CHANNEL_OPERATOR_PUBKEY || null,
       bridgeHolderPubkey: process.env.SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY || null,
       channelBroker: process.env.SORT_CHANNEL_BROKER || null,

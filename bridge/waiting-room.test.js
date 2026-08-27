@@ -1093,6 +1093,27 @@ test("GET /api/channel-info includes the #106 :443 fallback fields when configur
   );
 });
 
+test(
+  "handleChannelInfo: deploySha (CADS-DEMO-sort#52) -- null when the image was built without it, " +
+    "passed through verbatim when it was",
+  async () => {
+    await withEnv({ SORT_DEPLOY_SHA: "" }, async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleChannelInfo } = require("./server.js");
+      const res = fakeRes();
+      await handleChannelInfo({}, res);
+      assert.equal(JSON.parse(res.body).deploySha, null, "unset/empty build-arg -> null, not empty string");
+    });
+    await withEnv({ SORT_DEPLOY_SHA: "a1a18b9" }, async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleChannelInfo } = require("./server.js");
+      const res = fakeRes();
+      await handleChannelInfo({}, res);
+      assert.equal(JSON.parse(res.body).deploySha, "a1a18b9", "passed through verbatim, not reformatted");
+    });
+  }
+);
+
 test("GET /api/channel-info never serves an undecodable (odd-length/non-hex) cert -- the 2026-08-13 incident", async () => {
   // The real outage: a hand-copied env cert was odd-length (3 chars dropped) AND stale after a
   // CA reissue. Every consumer -- join.html participants and the bridge's own role command --
