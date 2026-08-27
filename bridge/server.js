@@ -159,6 +159,12 @@ function resetParticipantSeenForTests() {
 function getParticipantLastSeen(you) {
   return participantLastSeen.get(you) ?? null;
 }
+// Interpretation note for whoever eventually consumes this in a UI (flagged live, 2026-08-28): this
+// is "did it succeed the last time it was actually called", not "will it succeed right now" -- a
+// healthy participant that simply hasn't been raced in a while reads exactly the same as one that's
+// broken (both show an old timestamp). Render it as "last active <time>", never as a dead/alive
+// heartbeat -- there is no active probing here (see the #28 comment above), so staleness alone
+// never proves the participant is gone.
 
 // CADS-DEMO-sort#58: GET /participants advertises `you`/`label` only, with no way for a reader to
 // tell "has ever completed a real call" apart from "was just approved and never answered anything"
