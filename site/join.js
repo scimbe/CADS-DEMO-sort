@@ -240,12 +240,30 @@ form.addEventListener("submit", async (ev) => {
     // the response says so, and the status poll below then returns the grant on its first
     // request instead of after a human review. The waiting-room copy only shows on
     // deployments still running the manual-review flow.
-    showNote(
-      result.approved
-        ? "Approved automatically (your login is your legitimization) — fetching your grant…"
-        : "Request submitted. Waiting for an operator to review it…",
-      "ok"
-    );
+    //
+    // CADS-DEMO-sort#56: channelInfo.autoApproveAvailable (fetched at boot, see boot() above)
+    // reflects the bridge's automationConfigured() -- and handleJoinRequestApprove ALSO requires
+    // that same automationConfigured() (server.js), so when it's false, an operator's approve
+    // click fails closed too. There is no separate lower-tech manual path this deployment can fall
+    // back to: false means genuinely nobody can approve anyone right now. Previously this field
+    // was fetched and silently dropped, so a request queued during exactly that window still saw
+    // "Waiting for an operator to review it…" -- implying a review that could not happen.
+    if (!result.approved && channelInfo && channelInfo.autoApproveAvailable === false) {
+      showNote(
+        "Submitted, but this deployment can't approve join requests right now (automation is " +
+          "unavailable) -- an operator can't review it either until that's restored. Your request " +
+          "stays queued and will be picked up automatically once it is; you don't need to do " +
+          "anything, but it may be a while. Keep this tab open to see it resolve.",
+        "error"
+      );
+    } else {
+      showNote(
+        result.approved
+          ? "Approved automatically (your login is your legitimization) — fetching your grant…"
+          : "Request submitted. Waiting for an operator to review it…",
+        "ok"
+      );
+    }
     pollStatus(body.you);
   } catch (e) {
     showNote(`request failed: ${e.message}`, "error");
