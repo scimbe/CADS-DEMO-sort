@@ -23,7 +23,7 @@
 #
 # Build context must be the REPO ROOT (not ./bridge) so this stage can see ../grant/ -- see
 # compose.sort-demo.yml's `context: .` for the bridge service.
-FROM rust:1-slim-bookworm AS grant-builder
+FROM rust:1-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157 AS grant-builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -53,7 +53,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 #   (`600ed5c`), and the ping-capable `'K'` TCP-fallback role for middleboxes that kill idle
 #   ACK-only keepalives (`eb4de4d`, measured on this deployment: ~10-15s idle death, 8s ping
 #   interval deliberately under that).
-FROM rust:1-slim-bookworm AS ct-agent-builder
+FROM rust:1-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157 AS ct-agent-builder
 ARG CT_AGENT_REF=
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev cmake protobuf-compiler \
@@ -76,7 +76,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked --manifest-path native/Cargo.toml \
     && cp target/release/ct-agent /tmp/ct-agent
 
-FROM node:20-slim
+FROM node:20-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0
 WORKDIR /app
 # CADS-DEMO-sort#52's push-lag incident: an outside reader had no way to tell the deployed code
 # apart from origin/main's HEAD short of discovering an 11-commit gap by accident. Baking the
@@ -108,7 +108,20 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends python3 tini \
     && rm -rf /var/lib/apt/lists/* \
     && /usr/local/bin/ct-agent --version </dev/null
+# Run as node:20-slim's own built-in unprivileged `node` user (uid/gid 1000) rather than root.
+# /var/lib/sort-demo is the mountpoint for the writable sort_demo_waiting_room volume (join
+# requests, approvals, pending grants) -- chown it here so a freshly-created named volume
+# inherits `node` ownership from the image on first mount. /app itself stays read-only to the
+# app (server.js et al. are never written to at runtime) but is chowned too for consistency.
+RUN mkdir -p /var/lib/sort-demo \
+    && chown -R node:node /app /var/lib/sort-demo
+USER node
 EXPOSE 8789
+# /healthz (bridge/server.js:2029) always returns 200 with no auth -- a plain unauthenticated
+# probe from inside the container is enough. node is already the runtime, so this avoids
+# installing curl/wget just for the healthcheck.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "require('http').get('http://127.0.0.1:8789/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 # node:20-slim's own docker-entrypoint.sh is kept (it just `exec "$@"`s) so this image behaves
 # exactly like its base apart from gaining a reaping init.
 ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]

@@ -3,7 +3,7 @@
 # (each participant runs their own, separately, per docs/onboarding.md). Same
 # standalone-repo shape as CADS-a2a-demo's/CADS-auction-demo's Agent.Dockerfile.
 
-FROM rust:1-slim-bookworm AS builder
+FROM rust:1-slim-bookworm@sha256:1469a27c125cb5a3aebfa4f4e4665d935b02fb72cc093b2c974b3d740e43f157 AS builder
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
@@ -31,9 +31,19 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cargo build --release --locked \
     && cp target/release/ct-agent /tmp/ct-agent
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171 AS runtime
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /tmp/ct-agent /usr/local/bin/ct-agent
+# debian:bookworm-slim has no unprivileged user by default -- add one. ct-agent only ever dials
+# OUT (CT_AGENT_EDGE) and writes its own state (CT_AGENT_STATE_DIR=/var/lib/ct-agent, mounted as
+# the sort_demo_agent_state volume) and capability file (CT_AGENT_CAPABILITY_OUT, under /tmp,
+# already world-writable) -- it never needs to bind a privileged port, so no special capability
+# is required here (contrast Caddy.Dockerfile, which does bind :443).
+RUN groupadd --gid 10001 ctagent \
+    && useradd --uid 10001 --gid ctagent --no-create-home --shell /usr/sbin/nologin ctagent \
+    && mkdir -p /var/lib/ct-agent \
+    && chown ctagent:ctagent /var/lib/ct-agent
+USER ctagent
 CMD ["ct-agent"]

@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   no-symlinks:
     # CADS-DEMO-sort#14: a git symlink (mode 120000) checks out on Windows as a 9-byte text file
@@ -15,7 +18,7 @@ jobs:
     # (accidental or otherwise) fails CI before it ships silently broken to Windows again.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Fail if any file in the repo is a git symlink
         run: |
           symlinks="$(git ls-files -s | awk '$1 == "120000" { print $4 }')"
@@ -28,8 +31,8 @@ jobs:
   bridge-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
       - run: node --test bridge/*.test.js
@@ -51,8 +54,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.x'
       - name: Scaffold a participant outside the clone and run the first-success checks

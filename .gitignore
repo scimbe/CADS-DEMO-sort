@@ -1,6 +1,12 @@
 node_modules/
 participants/*/generated/
 
+# Deploy invocation is `docker compose --env-file .env up` (README.md/compose.sort-demo.yml) --
+# nothing has leaked (no .env tracked as of this writing), but guard against a future `git add -A`
+# accidentally staging it.
+.env
+*.env.local
+
 # Waiting-room runtime state (SORT_JOIN_REQUESTS_FILE / SORT_PARTICIPANTS_APPROVED_FILE default
 # to these relative paths when unset -- real bridge-written data, never source, never committed).
 /join-requests.json
