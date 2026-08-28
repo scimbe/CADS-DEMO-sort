@@ -369,6 +369,162 @@ test("handleJoinRequestSubmit: rejects the same holderPub already pending under 
   );
 });
 
+// --- CADS-DEMO-sort#55: a resubmit under the SAME id replaces its own stale pending request -----
+
+test(
+  "handleJoinRequestSubmit: a resubmit with the SAME id and SAME holderPub replaces its own " +
+    "stale pending request instead of being rejected (CADS-DEMO-sort#55)",
+  async () => {
+    await withEnv(
+      {
+        SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
+        SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
+        SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+      },
+      async () => {
+        delete require.cache[require.resolve("./server.js")];
+        const { handleJoinRequestSubmit } = require("./server.js");
+        const staleCreatedAt = Date.now() - 26 * 3600 * 1000; // e.g. the #52 live specimen: 26h+ stuck
+        const joinRequests = new Map([
+          [
+            "stuck-participant",
+            {
+              you: "stuck-participant",
+              label: "Stuck Participant",
+              holderPub: vectors.holder_a_pub,
+              noisePub: vectors.noise_a_pub,
+              attestation: vectors.positive.signature,
+              createdAt: staleCreatedAt,
+              gateEmail: null,
+            },
+          ],
+        ]);
+        const participants = new Map();
+        const res = fakeRes();
+        await handleJoinRequestSubmit(
+          fakeReq({
+            you: "stuck-participant",
+            holderPub: vectors.holder_a_pub, // SAME holder key -- the same browser identity
+            noisePub: vectors.noise_a_pub,
+            attestation: vectors.positive.signature,
+          }),
+          res,
+          joinRequests,
+          participants
+        );
+        assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode}: ${res.body}`);
+        assert.equal(JSON.parse(res.body).approved, false, "automation not configured -- still the manual queue");
+        assert.equal(joinRequests.size, 1, "replaced in place, not appended as a second entry");
+        assert.ok(
+          joinRequests.get("stuck-participant").createdAt > staleCreatedAt,
+          "the resubmit refreshes createdAt -- this is a genuinely new pending window, not the stale one"
+        );
+      }
+    );
+  }
+);
+
+test(
+  "handleJoinRequestSubmit: a resubmit with a DIFFERENT holderPub under the same id is still " +
+    "rejected -- only the SAME browser identity may replace its own pending request (CADS-DEMO-sort#55 safety boundary)",
+  async () => {
+    await withEnv(
+      {
+        SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
+        SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
+        SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+      },
+      async () => {
+        delete require.cache[require.resolve("./server.js")];
+        const { handleJoinRequestSubmit } = require("./server.js");
+        const joinRequests = new Map([
+          [
+            "contested-id",
+            {
+              you: "contested-id",
+              label: "Original Holder",
+              holderPub: vectors.holder_a_pub,
+              noisePub: vectors.noise_a_pub,
+              attestation: vectors.positive.signature,
+              createdAt: Date.now(),
+              gateEmail: null,
+            },
+          ],
+        ]);
+        const participants = new Map();
+        const res = fakeRes();
+        // A DIFFERENT holder key claiming the same id -- attestation content doesn't matter here,
+        // this must be rejected before attestation is ever checked (someone else's browser cannot
+        // impersonate or bump the original holder's pending request).
+        await handleJoinRequestSubmit(
+          fakeReq({
+            you: "contested-id",
+            holderPub: vectors.holder_b_pub,
+            noisePub: vectors.noise_a_pub,
+            attestation: vectors.positive.signature,
+          }),
+          res,
+          joinRequests,
+          participants
+        );
+        assert.equal(res.statusCode, 409);
+        assert.match(JSON.parse(res.body).error, /contested-id/);
+        assert.equal(joinRequests.size, 1);
+        assert.equal(
+          joinRequests.get("contested-id").holderPub,
+          vectors.holder_a_pub,
+          "the original holder's entry must be untouched"
+        );
+      }
+    );
+  }
+);
+
+test("handleJoinRequestSubmit: stores the gate-verified email on a manually queued entry, or null for an ungated submission (CADS-DEMO-sort#54)", async () => {
+  await withEnv(
+    {
+      SORT_CHANNEL_OPERATOR_PUBKEY: vectors.operator_pub,
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: vectors.holder_b_pub,
+      SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+    },
+    async () => {
+      delete require.cache[require.resolve("./server.js")];
+      const { handleJoinRequestSubmit } = require("./server.js");
+
+      const joinRequests1 = new Map();
+      const res1 = fakeRes();
+      await handleJoinRequestSubmit(
+        fakeReq(
+          { you: "gated-but-unautomated", holderPub: vectors.holder_a_pub, noisePub: vectors.noise_a_pub, attestation: vectors.positive.signature },
+          { "x-gate-email": "Workshop-User@Example.ORG" }
+        ),
+        res1,
+        joinRequests1,
+        new Map(),
+        new Map()
+      );
+      assert.equal(res1.statusCode, 200);
+      assert.equal(
+        joinRequests1.get("gated-but-unautomated").gateEmail,
+        "workshop-user@example.org",
+        "the gate-verified email is recorded (lowercased, per gateVerifiedEmail), for a later re-arm scan to reuse"
+      );
+
+      const joinRequests2 = new Map();
+      const res2 = fakeRes();
+      await handleJoinRequestSubmit(
+        fakeReq({ you: "anon-flow-2", holderPub: vectors.holder_a_pub, noisePub: vectors.noise_a_pub, attestation: vectors.positive.signature }),
+        res2,
+        joinRequests2,
+        new Map(),
+        new Map()
+      );
+      assert.equal(res2.statusCode, 200);
+      assert.equal(joinRequests2.get("anon-flow-2").gateEmail, null, "no gate header -> null, not omitted or undefined-on-disk");
+    }
+  );
+});
+
 test("admin routes: fail closed (503) when SORT_ADMIN_EMAILS is unset", async () => {
   await withEnv({ SORT_ADMIN_EMAILS: "" }, () => {
     delete require.cache[require.resolve("./server.js")];
@@ -585,6 +741,252 @@ test(
       );
     } finally {
       stub.close();
+    }
+  }
+);
+
+// --- CADS-DEMO-sort#54: the re-arm scan (autoApproveEligiblePendingRequests) ---------------------
+
+/** Builds a real automation environment (the real vendored grant binary + a real local HTTP
+ *  server standing in for the control plane), same ethos as the "full automation" test above --
+ *  these tests prove the re-arm scan's actual wiring, not a mocked automateApproval.
+ *  genParticipant(you) returns a fresh holder/noise identity plus a validly-signed attestation for
+ *  THIS harness's channel (needed by any test going through handleJoinRequestSubmit, which
+ *  verifies it; autoApproveEligiblePendingRequests itself never re-verifies a queued entry's
+ *  attestation -- same as handleJoinRequestApprove doesn't -- so it isn't required there, but a
+ *  real one is used throughout anyway for consistency). Caller must `harness.stub.close()` in a
+ *  `finally`. */
+async function makeAutomationHarness() {
+  const genIdentity = () => {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+    return {
+      pub: publicKey.export({ type: "spki", format: "der" }).subarray(-32),
+      priv: privateKey.export({ type: "pkcs8", format: "der" }).subarray(-32),
+    };
+  };
+  const operator = genIdentity();
+  const bridge = { holder: genIdentity(), noise: genIdentity() };
+  const received = [];
+  const stub = require("node:http").createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      received.push({ method: req.method, url: req.url, body: JSON.parse(body || "{}") });
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    });
+  });
+  await new Promise((resolve) => stub.listen(0, "127.0.0.1", resolve));
+  const cpUrl = `http://127.0.0.1:${stub.address().port}`;
+
+  const { channelIdForLink, memberNoiseAttestBytes } = require("./attestation.js");
+  function genParticipant(you) {
+    const holder = genIdentity();
+    const noise = genIdentity();
+    const channel = channelIdForLink(operator.pub, bridge.holder.pub, holder.pub);
+    const msg = memberNoiseAttestBytes(channel, holder.pub, noise.pub);
+    const sigKey = crypto.createPrivateKey({
+      key: Buffer.concat([Buffer.from("302e020100300506032b657004220420", "hex"), holder.priv]),
+      format: "der",
+      type: "pkcs8",
+    });
+    const attestation = crypto.sign(null, msg, sigKey);
+    return {
+      you,
+      label: you,
+      holderPub: holder.pub.toString("hex"),
+      noisePub: noise.pub.toString("hex"),
+      attestation: attestation.toString("hex"),
+      channelHex: channel.toString("hex"),
+    };
+  }
+
+  const operatorKeyFile = tmpFile("operator.key");
+  fs.writeFileSync(operatorKeyFile, operator.priv.toString("hex"));
+
+  return {
+    stub,
+    received,
+    genParticipant,
+    withVars: {
+      SORT_GRANT_BIN: GRANT_BIN_PATH,
+      SORT_CHANNEL_OPERATOR_PUBKEY: operator.pub.toString("hex"),
+      SORT_CHANNEL_OPERATOR_KEY_FILE: operatorKeyFile,
+      SORT_CHANNEL_BRIDGE_HOLDER_KEY: bridge.holder.priv.toString("hex"),
+      SORT_CHANNEL_BRIDGE_HOLDER_PUBKEY: bridge.holder.pub.toString("hex"),
+      SORT_CHANNEL_BRIDGE_NOISE_KEY: bridge.noise.priv.toString("hex"),
+      SORT_CHANNEL_BRIDGE_NOISE_PUBKEY: bridge.noise.pub.toString("hex"),
+      SORT_CP_URL: cpUrl,
+      SORT_OIDC_TOKEN: "test-token",
+      SORT_CHANNEL_BROKER: "test-edge:4435",
+      SORT_CHANNEL_RELAY: "test-edge:4436",
+    },
+  };
+}
+
+test("autoApproveEligiblePendingRequests: a no-op when automation isn't configured -- nothing in the queue is touched", async () => {
+  delete require.cache[require.resolve("./server.js")];
+  const { autoApproveEligiblePendingRequests } = require("./server.js");
+  const joinRequests = new Map([
+    [
+      "waiting",
+      {
+        you: "waiting",
+        label: "Waiting",
+        holderPub: vectors.holder_a_pub,
+        noisePub: vectors.noise_a_pub,
+        attestation: vectors.positive.signature,
+        createdAt: Date.now(),
+        gateEmail: "user@example.org",
+      },
+    ],
+  ]);
+  const participants = new Map();
+  const pendingGrantDelivery = new Map();
+  const { approved } = await autoApproveEligiblePendingRequests(joinRequests, participants, pendingGrantDelivery);
+  assert.deepEqual(approved, []);
+  assert.equal(joinRequests.size, 1, "still queued -- automationConfigured() is false in this bare test env");
+  assert.equal(participants.size, 0);
+});
+
+test(
+  "autoApproveEligiblePendingRequests: skips a pending entry with no recorded gateEmail even though " +
+    "automation is configured (CADS-DEMO-sort#54 safety constraint -- see the maintainer's comment " +
+    "on #54: a drain that approved every entry regardless would bypass the gate check and the " +
+    "per-account rate limit the live submit path enforces)",
+  { skip: !grantBinAvailable && "grant binary not built (run: cd grant && cargo build --release)" },
+  async () => {
+    const harness = await makeAutomationHarness();
+    try {
+      await withEnv(
+        {
+          ...harness.withVars,
+          SORT_PARTICIPANTS_APPROVED_FILE: tmpFile("participants-approved.json"),
+          SORT_PENDING_GRANTS_FILE: tmpFile("pending-grants.json"),
+          SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+        },
+        async () => {
+          delete require.cache[require.resolve("./server.js")];
+          const { autoApproveEligiblePendingRequests, automationConfigured } = require("./server.js");
+          assert.equal(automationConfigured(), true, "sanity: this harness's env really does satisfy automationConfigured()");
+          const p = harness.genParticipant("no-gate-email-on-record");
+          const joinRequests = new Map([
+            [p.you, { you: p.you, label: p.label, holderPub: p.holderPub, noisePub: p.noisePub, attestation: p.attestation, createdAt: Date.now() }],
+          ]);
+          const participants = new Map();
+          const pendingGrantDelivery = new Map();
+          const { approved } = await autoApproveEligiblePendingRequests(joinRequests, participants, pendingGrantDelivery);
+          assert.deepEqual(approved, []);
+          assert.equal(joinRequests.size, 1, "left exactly as it was -- no gateEmail means no authorization to act on");
+          assert.equal(participants.size, 0);
+          assert.equal(harness.received.length, 0, "the control plane was never even contacted for this entry");
+        }
+      );
+    } finally {
+      harness.stub.close();
+    }
+  }
+);
+
+test(
+  "autoApproveEligiblePendingRequests: approves a pending entry with a recorded gateEmail once " +
+    "automation is configured (CADS-DEMO-sort#54)",
+  { skip: !grantBinAvailable && "grant binary not built (run: cd grant && cargo build --release)" },
+  async () => {
+    const harness = await makeAutomationHarness();
+    try {
+      const joinFile = tmpFile("join-requests.json");
+      await withEnv(
+        {
+          ...harness.withVars,
+          SORT_PARTICIPANTS_APPROVED_FILE: tmpFile("participants-approved.json"),
+          SORT_PENDING_GRANTS_FILE: tmpFile("pending-grants.json"),
+          SORT_JOIN_REQUESTS_FILE: joinFile,
+        },
+        async () => {
+          delete require.cache[require.resolve("./server.js")];
+          const { autoApproveEligiblePendingRequests } = require("./server.js");
+          const p = harness.genParticipant("recovered-participant");
+          // Simulates the #52 live specimen: queued 20 minutes ago (while automation was down),
+          // with the gateEmail this submit-time gate check would have recorded.
+          const joinRequests = new Map([
+            [
+              p.you,
+              {
+                you: p.you,
+                label: p.label,
+                holderPub: p.holderPub,
+                noisePub: p.noisePub,
+                attestation: p.attestation,
+                createdAt: Date.now() - 20 * 60 * 1000,
+                gateEmail: "recovering-user@example.org",
+              },
+            ],
+          ]);
+          const participants = new Map();
+          const pendingGrantDelivery = new Map();
+          const { approved } = await autoApproveEligiblePendingRequests(joinRequests, participants, pendingGrantDelivery);
+          assert.deepEqual(approved, [p.you]);
+          assert.equal(joinRequests.size, 0, "removed from the queue -- it's live now, not still pending");
+          assert.ok(participants.has(p.you), "a live participant, exactly as a real submit's auto-approve branch would produce");
+          assert.ok(pendingGrantDelivery.has(p.you), "the participant's own grant is waiting for their next status poll");
+          assert.equal(pendingGrantDelivery.get(p.you).channel, p.channelHex);
+          // Persisted, not just updated in-memory -- a bridge restart between the scan and the
+          // participant's next poll must not strand this, exactly like sort#26 originally did.
+          const onDisk = JSON.parse(fs.readFileSync(joinFile, "utf8"));
+          assert.equal(onDisk.length, 0);
+        }
+      );
+    } finally {
+      harness.stub.close();
+    }
+  }
+);
+
+test(
+  "handleJoinRequestSubmit: a same-id/same-holderPub resubmit gets approved on the spot once " +
+    "automation has come back (CADS-DEMO-sort#54 + #55 combined recovery path)",
+  { skip: !grantBinAvailable && "grant binary not built (run: cd grant && cargo build --release)" },
+  async () => {
+    const harness = await makeAutomationHarness();
+    try {
+      await withEnv(
+        {
+          ...harness.withVars,
+          SORT_PARTICIPANTS_APPROVED_FILE: tmpFile("participants-approved.json"),
+          SORT_PENDING_GRANTS_FILE: tmpFile("pending-grants.json"),
+          SORT_JOIN_REQUESTS_FILE: tmpFile("join-requests.json"),
+        },
+        async () => {
+          delete require.cache[require.resolve("./server.js")];
+          const { handleJoinRequestSubmit } = require("./server.js");
+          const p = harness.genParticipant("was-stuck-now-recovers");
+          // The #52 live specimen exactly: queued hours ago, while automation was down.
+          const joinRequests = new Map([
+            [p.you, { you: p.you, label: p.label, holderPub: p.holderPub, noisePub: p.noisePub, attestation: p.attestation, createdAt: Date.now() - 3 * 3600 * 1000 }],
+          ]);
+          const participants = new Map();
+          const pendingGrantDelivery = new Map();
+          const res = fakeRes();
+          await handleJoinRequestSubmit(
+            fakeReq(
+              { you: p.you, holderPub: p.holderPub, noisePub: p.noisePub, attestation: p.attestation },
+              { "x-gate-email": "recovering-user@example.org" }
+            ),
+            res,
+            joinRequests,
+            participants,
+            pendingGrantDelivery
+          );
+          assert.equal(res.statusCode, 200, `expected 200, got ${res.statusCode}: ${res.body}`);
+          assert.equal(JSON.parse(res.body).approved, true, "automation is configured now -- the resubmit takes the auto-approve branch");
+          assert.equal(joinRequests.size, 0, "the stale queue entry is gone, not left behind alongside the new live participant");
+          assert.ok(participants.has(p.you));
+          assert.ok(pendingGrantDelivery.has(p.you));
+        }
+      );
+    } finally {
+      harness.stub.close();
     }
   }
 );

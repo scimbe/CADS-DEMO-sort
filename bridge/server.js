@@ -1579,6 +1579,64 @@ async function automateApproval(pending) {
   return { ok: true, channel: minted.channel, cmd, grantB: minted.grantB, portalDeposit };
 }
 
+// you -> true while automateApproval is mid-flight for that id, from EITHER a live submit
+// (handleJoinRequestSubmit, including a CADS-DEMO-sort#55 resubmit-replaces-pending) or the
+// re-arm scan below (CADS-DEMO-sort#54) -- both can reach for the SAME still-queued entry (a
+// resubmit for `you` doesn't remove the old queue entry until automateApproval actually
+// succeeds), and without this guard both could pass their own "still pending" check and race
+// each other into minting two grants + registering the channel twice for one participant.
+const joinRequestApprovalInFlight = new Set();
+
+/** CADS-DEMO-sort#54: a pending join request was only ever evaluated once, at submit time
+ *  (handleJoinRequestSubmit) -- if automation was unconfigured then, the request stayed
+ *  "pending" forever, even once automation came back, because nothing re-examined the queue.
+ *  This re-scans it: for every pending entry submitted by a gate-verified account (`gateEmail`,
+ *  captured at submit time over an authenticated request -- see handleJoinRequestSubmit) that is
+ *  now eligible, approve it exactly as the live submit path would.
+ *
+ *  Deliberately skips any entry with no gateEmail (an ungated deployment, or one predating this
+ *  field) -- this runs off a timer, not a live HTTP request, so there is no gate identity to
+ *  source for those entries; they stay queued for a human admin approve, unchanged from before.
+ *  This is the exact safety constraint the maintainer flagged directly on #54: a naive drain that
+ *  approved every pending entry regardless would bypass both the gate check and the per-account
+ *  autoApproveRateLimited the live submit path enforces. Re-checking that same rate limit below,
+ *  keyed by the STORED (submit-time-verified) gateEmail, reproduces exactly the authorization
+ *  decision the submit path would have made had automation been up at submit time -- it never
+ *  trusts the queued entry's mere presence as authorization on its own. */
+async function autoApproveEligiblePendingRequests(joinRequests, participants, pendingGrantDelivery) {
+  const approved = [];
+  if (!automationConfigured()) return { approved };
+  for (const [you, pending] of [...joinRequests]) {
+    if (!pending.gateEmail) continue; // no gate identity recorded -- stays admin-only
+    if (autoApproveRateLimited(pending.gateEmail)) continue; // over quota right now -- try next scan
+    if (joinRequestApprovalInFlight.has(you)) continue; // a concurrent submit/scan already owns this id
+    joinRequestApprovalInFlight.add(you);
+    let result;
+    try {
+      result = await automateApproval(pending);
+    } catch (e) {
+      process.stderr.write(`join-requests: re-arm auto-approval failed for "${you}" (${pending.gateEmail}): ${e.message}\n`);
+      continue;
+    } finally {
+      joinRequestApprovalInFlight.delete(you);
+    }
+    if (!result.ok) {
+      process.stderr.write(`join-requests: re-arm auto-approval failed for "${you}" (${pending.gateEmail}): ${result.detail}\n`);
+      continue;
+    }
+    joinRequests.delete(you);
+    addApprovedParticipant(participants, { you: pending.you, label: pending.label, cmd: result.cmd, holderPub: pending.holderPub });
+    pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
+    approved.push(you);
+  }
+  if (approved.length) {
+    persistJoinRequests(joinRequests);
+    persistPendingGrants(pendingGrantDelivery);
+    process.stderr.write(`join-requests: re-arm scan auto-approved ${approved.length} pending request(s): ${approved.join(", ")}\n`);
+  }
+  return { approved };
+}
+
 // ---- Waiting room: route handlers --------------------------------------------------------------
 
 /** GET /api/channel-info -- public, unauthenticated. The pubkeys are the deployment's own PUBLIC
@@ -1660,8 +1718,24 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
   if (typeof noisePub !== "string" || !HEX32_RE.test(noisePub)) return jsonError(res, 400, "noisePub must be 64 hex chars");
   if (typeof attestation !== "string" || !HEX64_RE.test(attestation)) return jsonError(res, 400, "attestation must be 128 hex chars");
   if (participants.has(you)) return jsonError(res, 409, `"${you}" is already a live participant`);
-  if (joinRequests.has(you)) return jsonError(res, 409, `"${you}" already has a pending join request`);
-  if (joinRequests.size >= JOIN_REQUEST_MAX_PENDING) return jsonError(res, 503, "too many pending requests -- try again later");
+
+  // CADS-DEMO-sort#55: a resubmit under the SAME id from the SAME holder key (proven below by the
+  // attestation check, exactly as any other submission) replaces its own stale pending request
+  // instead of being rejected. Before this fix a stuck pending request pinned the browser identity
+  // permanently: neither the same id ("already pending") nor a different id ("one holder key backs
+  // one participant id") could get it out, and the documented recovery ("wait") could never
+  // resolve it on its own (CADS-DEMO-sort#54: nothing re-evaluated a queued request). Requiring the
+  // SAME holderPub is what makes this safe -- only whoever holds the matching holder PRIVATE key
+  // can produce a valid attestation for it (verified below), so this can't be used to steal or bump
+  // someone ELSE's pending id out from under them; that case (different holderPub, same id) still
+  // 409s, unchanged from before.
+  const existingPending = joinRequests.get(you);
+  if (existingPending && existingPending.holderPub !== holderPub) {
+    return jsonError(res, 409, `"${you}" already has a pending join request`);
+  }
+  if (!existingPending && joinRequests.size >= JOIN_REQUEST_MAX_PENDING) {
+    return jsonError(res, 503, "too many pending requests -- try again later");
+  }
 
   // A holderPub, not `you`, is what channelIdForLink is a function of -- two different
   // participant ids submitted with the SAME holderPub don't get two channels, they get one
@@ -1727,6 +1801,15 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
         `too many participants approved for this account in the last hour (max ${AUTO_APPROVE_RATE_LIMIT}) -- try again later`
       );
     }
+    if (joinRequestApprovalInFlight.has(you)) {
+      // CADS-DEMO-sort#54's re-arm scan (autoApproveEligiblePendingRequests) is already approving
+      // this exact id concurrently -- refuse rather than race it into minting a second grant for
+      // the same participant. Rare in practice (it requires the scan to land mid-flight on the
+      // same id a browser is simultaneously resubmitting), but real once #55 made a resubmit
+      // reachable while an entry is still queued.
+      return jsonError(res, 429, "this join request is already being processed -- try again shortly");
+    }
+    joinRequestApprovalInFlight.add(you);
     const pending = { you, label: label || you, holderPub, noisePub, attestation };
     let result;
     try {
@@ -1734,9 +1817,17 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
     } catch (e) {
       process.stderr.write(`join-requests: auto-approval failed for "${you}" (${gateEmail}): ${e.message}\n`);
       return jsonError(res, 500, "automated approval failed -- see bridge logs");
+    } finally {
+      joinRequestApprovalInFlight.delete(you);
     }
     if (!result.ok) {
       return jsonError(res, 502, `automated approval failed: ${result.detail}`);
+    }
+    if (existingPending) {
+      // Superseded by this fresh, freshly-attested submission -- the old queue entry would
+      // otherwise linger and could still be picked up by the re-arm scan.
+      joinRequests.delete(you);
+      persistJoinRequests(joinRequests);
     }
     addApprovedParticipant(participants, { you, label: pending.label, cmd: result.cmd, holderPub: pending.holderPub });
     pendingGrantDelivery.set(you, { channel: result.channel, grantB: result.grantB, createdAt: Date.now() });
@@ -1747,7 +1838,12 @@ async function handleJoinRequestSubmit(req, res, joinRequests, participants, pen
     return;
   }
 
-  joinRequests.set(you, { you, label: label || you, holderPub, noisePub, attestation, createdAt: Date.now() });
+  // gateEmail (CADS-DEMO-sort#54): stored so a later re-arm scan (autoApproveEligiblePendingRequests)
+  // can re-apply the SAME gate-identity + per-account rate-limit checks this submit path just
+  // applied, instead of trusting the queued entry's mere presence as authorization. null (not
+  // omitted) when this deployment doesn't gate joins at all -- those entries stay admin-only
+  // forever, which is unchanged, correct behavior for an ungated deployment.
+  joinRequests.set(you, { you, label: label || you, holderPub, noisePub, attestation, createdAt: Date.now(), gateEmail: gateEmail || null });
   persistJoinRequests(joinRequests);
   res.writeHead(200, { "content-type": "application/json" });
   res.end(JSON.stringify({ ok: true, channelId: channel.toString("hex"), approved: false }));
@@ -2131,6 +2227,15 @@ function main() {
   } catch (e) {
     process.stderr.write(`participant-sweep: initial reconcile failed: ${e.message}\n`);
   }
+  // CADS-DEMO-sort#54: fire the re-arm scan once at boot too, not just on the interval below --
+  // automation may already be configured by the time the process comes up (e.g. after a restart
+  // that also restored it), and the queue can hold entries stranded from before this bridge last
+  // stopped (loadJoinRequests() reloads it from disk). Without this, those would otherwise wait up
+  // to a full PARTICIPANT_SWEEP_INTERVAL_MS for the first scan. Fire-and-forget: must not delay
+  // server.listen below.
+  autoApproveEligiblePendingRequests(joinRequests, participants, pendingGrantDelivery).catch((e) => {
+    process.stderr.write(`join-requests: startup re-arm scan failed: ${e.message}\n`);
+  });
   const sweepTimer = setInterval(() => {
     try {
       const { pruned } = reconcileApprovedParticipants(participants, { bootTime });
@@ -2143,6 +2248,13 @@ function main() {
     } catch (e) {
       process.stderr.write(`participant-sweep: failed: ${e.message}\n`);
     }
+    // CADS-DEMO-sort#54: piggy-backs on the same timer/cadence as the liveness sweep above rather
+    // than a second dedicated timer -- reuses existing, already-configurable infrastructure
+    // (SORT_PARTICIPANT_SWEEP_INTERVAL_MS) instead of adding a new one. Async; deliberately not
+    // awaited inside this (synchronous) setInterval callback.
+    autoApproveEligiblePendingRequests(joinRequests, participants, pendingGrantDelivery).catch((e) => {
+      process.stderr.write(`join-requests: re-arm scan failed: ${e.message}\n`);
+    });
   }, PARTICIPANT_SWEEP_INTERVAL_MS);
   if (typeof sweepTimer.unref === "function") sweepTimer.unref();
 
@@ -2200,6 +2312,7 @@ module.exports = {
   mintGrants,
   cpFetch,
   automateApproval,
+  autoApproveEligiblePendingRequests,
   freshenedCmd,
   currentOidcToken,
   ensureServiceOidcToken,
