@@ -104,25 +104,36 @@ COPY --from=ct-agent-builder /tmp/ct-agent /usr/local/bin/ct-agent
 # reaps them; confirmed by building this image and re-running the reproduction against it.
 # Baked into the image rather than left to `docker run --init` / compose `init: true` so the fix
 # cannot be silently lost by however this image happens to be launched.
+#  gosu lets a root-started container step down to an unprivileged user via exec (no extra
+# process, signals/PID pass straight through) -- see docker-entrypoint-dropperms.sh below for
+# why this image needs to start as root at all rather than just declaring `USER node`.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends python3 tini \
+    && apt-get install -y --no-install-recommends python3 tini gosu \
     && rm -rf /var/lib/apt/lists/* \
     && /usr/local/bin/ct-agent --version </dev/null
-# Run as node:20-slim's own built-in unprivileged `node` user (uid/gid 1000) rather than root.
 # /var/lib/sort-demo is the mountpoint for the writable sort_demo_waiting_room volume (join
 # requests, approvals, pending grants) -- chown it here so a freshly-created named volume
 # inherits `node` ownership from the image on first mount. /app itself stays read-only to the
 # app (server.js et al. are never written to at runtime) but is chowned too for consistency.
 RUN mkdir -p /var/lib/sort-demo \
     && chown -R node:node /app /var/lib/sort-demo
-USER node
+COPY bridge/docker-entrypoint-dropperms.sh /usr/local/bin/docker-entrypoint-dropperms.sh
+RUN chmod 0755 /usr/local/bin/docker-entrypoint-dropperms.sh
+# No final USER here, deliberately: this container MUST start as root so
+# docker-entrypoint-dropperms.sh can read the root-owned/0600 host-bind-mounted channel-identity
+# secrets, copy them to a node-owned location, then drop to `node` itself before the app ever
+# runs (see that script's header comment and CADS-DEMO-sort#45 / ops/deployment-ledger.ndjson,
+# 2026-08-28T10:25:00Z, for why a bare `USER node` regressed secret readability on this host).
 EXPOSE 8789
 # /healthz (bridge/server.js:2029) always returns 200 with no auth -- a plain unauthenticated
 # probe from inside the container is enough. node is already the runtime, so this avoids
-# installing curl/wget just for the healthcheck.
+# installing curl/wget just for the healthcheck. Runs as the container's default user (root,
+# per above) since HEALTHCHECK execs outside the entrypoint chain; harmless for a bare HTTP GET.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "require('http').get('http://127.0.0.1:8789/healthz',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
-# node:20-slim's own docker-entrypoint.sh is kept (it just `exec "$@"`s) so this image behaves
-# exactly like its base apart from gaining a reaping init.
-ENTRYPOINT ["/usr/bin/tini", "--", "docker-entrypoint.sh"]
+# tini stays the container's actual PID 1 (reaping, see the tini comment above);
+# docker-entrypoint-dropperms.sh runs as root under it, then gosu execs the real CMD as `node`
+# -- replacing the process (not forking), so `node server.js` still ends up running directly
+# under tini for signal/reaping purposes, just no longer as root.
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/docker-entrypoint-dropperms.sh"]
 CMD ["node", "server.js"]
